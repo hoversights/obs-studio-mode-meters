@@ -1,58 +1,51 @@
 # Open findings
 
-## `active` reads false for a source on the Program scene — UNRESOLVED
+## `active` is the wrong mechanism — RESOLVED as a design defect, 2026-08-14
 
-Found 2026-08-14 by `scripts/load-test.py`, in an isolated profile and
-scene collection:
+**Not a bug in the plugin's reporting.** Measured directly: for the same
+source at the same moment, obs-websocket's own `GetSourceActive` returns
+exactly what the plugin reports.
 
 ```
-PASS  the tone is metered on Program
-PASS  reported level matches the tone — expected -20.0 dBFS, read -20.0 (off by 0.0 dB)
-FAIL  active is true while on Program — active=False
+OBS says a_only     : {'videoActive': False, 'videoShowing': False}
+OBS says with_video : {'videoActive': False, 'videoShowing': False}
+plugin reports      : active=False
 ```
 
-The level is exact. The flag is wrong, and the flag is the entire point of
-this plugin: `active` is what tells a client whether a metered source is on
-Program or only staged in Preview. If it is unreliable, the plugin has
-nothing to offer over obs-websocket's own meters.
+The plugin faithfully relays `obs_source_active()`. It is not lying.
 
-**Not explainable as a failed symbol resolve.** `obs_source_active` is
-fetched with `let Some(..) = obs_source_active() else { return }`, so an
-unresolved symbol yields no level at all. A level arrived. The function ran
-and returned false.
+**The problem is that `obs_source_active()` answers a different question.**
+Both sources above were in `PGM-B`, which `GetCurrentProgramScene` reported
+as the Program scene, with Studio Mode on and `PGM-A` as Preview. Even the
+source *with video* read false. Whatever `obs_source_active` tracks, it is
+not "is this source on the Program bus", which is what this plugin claims
+to report.
 
-**What the test did**: created an `ffmpeg_source` in the scene returned by
-`GetCurrentProgramScene`, triggered `RESTART`, waited past the plugin's 5s
-rescan, and read the level it emitted for that source.
-
-**FrameSW's success says nothing about this flag — it does not use it.**
-Confirmed 2026-08-14 in the app's own handler:
+**Why nothing caught it before.** FrameSW discards the flag —
 
 ```rust
 for (name, peak_db, _active) in levels {
 ```
 
-The underscore is the answer. FrameSW destructures `active` and discards
-it, because FrameSW staged the shots itself and already knows which are on
-Program and which are on Preview. So the flag has never been consumed by
-anything, and no amount of production use could have exercised it. The
-first thing that ever read it found it false.
+— because FrameSW staged the shots itself and already knows which bus each
+is on. The field has therefore never been consumed by anything. Production
+use could not have exercised it, and the first thing that ever read it
+found it wrong.
 
-That makes this more serious, not less. For FrameSW the field is spare. For
-this plugin it is the entire product: a client with no FrameSW has no other
-way to tell which bus a source is on, and the README promises exactly that.
+**Is this a bug report?** No. Nothing user-facing is broken today: FrameSW
+does not use the flag, and this plugin is unreleased. It is a design defect
+in an unpublished feature, caught before anyone depended on it.
 
-**Worth checking first, in this order:**
+### The fix
 
-1. Whether `obs_source_active()` is true for a source added directly to a
-   flat scene versus one nested in FrameSW's `PGM-A`/`PGM-B` structure.
-2. Whether Studio Mode being *off* changes what libobs considers active.
-   The test collection has no Studio Mode; FrameSW's forces it on.
-3. Whether the flag is read once at attach time and cached, rather than
-   evaluated per callback.
-4. Whether `obs_source_active` is the right libobs call at all.
-   `obs_source_showing` covers Preview visibility, and the distinction
-   between the two is precisely what this plugin claims to report.
+Stop asking each source whether it is active. **The plugin already knows
+the roles**: `attach_role_tap` attaches a tap to the Program scene and
+another to the Preview scene, and tracks which is which. The bus a sample
+belongs to is *which tap it arrived through* — authoritative by
+construction, with no per-source query that can disagree.
 
-**Do not publish the plugin until this is settled.** A directory listing
-that says "distinguishes Program from Preview" has to be true.
+`obs_source_showing` is not the answer either. It would be true for a
+source visible in either bus, which is the distinction being asked about.
+
+Until this is done, the README's claim to distinguish Program from Preview
+is not supported by the code. **Do not publish.**
