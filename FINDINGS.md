@@ -25,18 +25,34 @@ and returned false.
 `GetCurrentProgramScene`, triggered `RESTART`, waited past the plugin's 5s
 rescan, and read the level it emitted for that source.
 
+**FrameSW's success says nothing about this flag — it does not use it.**
+Confirmed 2026-08-14 in the app's own handler:
+
+```rust
+for (name, peak_db, _active) in levels {
+```
+
+The underscore is the answer. FrameSW destructures `active` and discards
+it, because FrameSW staged the shots itself and already knows which are on
+Program and which are on Preview. So the flag has never been consumed by
+anything, and no amount of production use could have exercised it. The
+first thing that ever read it found it false.
+
+That makes this more serious, not less. For FrameSW the field is spare. For
+this plugin it is the entire product: a client with no FrameSW has no other
+way to tell which bus a source is on, and the README promises exactly that.
+
 **Worth checking first, in this order:**
 
 1. Whether `obs_source_active()` is true for a source added directly to a
-   flat scene, versus one nested inside FrameSW's `PGM-A`/`PGM-B`
-   structure. FrameSW's meters work in production, so the flag is probably
-   right there — which would make this about scene structure or Studio
-   Mode state, not the metering code.
-2. Whether Studio Mode being *off* in the fresh collection changes what
-   libobs considers active. The test collection has no Studio Mode; the
-   FrameSW collection forces it on.
-3. Whether the flag is read at attach time and cached, rather than per
-   callback.
+   flat scene versus one nested in FrameSW's `PGM-A`/`PGM-B` structure.
+2. Whether Studio Mode being *off* changes what libobs considers active.
+   The test collection has no Studio Mode; FrameSW's forces it on.
+3. Whether the flag is read once at attach time and cached, rather than
+   evaluated per callback.
+4. Whether `obs_source_active` is the right libobs call at all.
+   `obs_source_showing` covers Preview visibility, and the distinction
+   between the two is precisely what this plugin claims to report.
 
 **Do not publish the plugin until this is settled.** A directory listing
 that says "distinguishes Program from Preview" has to be true.
