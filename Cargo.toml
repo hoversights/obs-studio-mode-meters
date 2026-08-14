@@ -24,4 +24,4 @@ crate-type = ["cdylib"]
 # be applied in both repositories.
 [dependencies.studio-mode-meters-core]
 git = "https://github.com/hoversights/framesw-obs-plugin"
-rev = "0b70302"
+rev = "a32dcac"
