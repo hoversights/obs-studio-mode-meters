@@ -271,7 +271,7 @@ def quantified_test(ws):
         time.sleep(7)
         peak, active = measure(ws, name)
         check("the tone is metered on Program", peak is not None,
-              "no level reported for the source")
+              "" if peak is not None else "no level reported for the source")
         if peak is not None:
             off = abs(peak - TONE_DBFS)
             check(f"reported level matches the tone", off <= TONE_TOLERANCE_DB,
@@ -307,6 +307,91 @@ def quantified_test(ws):
             os.remove(tone)
 
 
+TEST_PROFILE = "studio-mode-meters-test"
+TEST_COLLECTION = "studio-mode-meters-test"
+
+
+def isolate(ws):
+    """Switches OBS into a profile and scene collection of our own.
+
+    Two reasons, and the second is why this exists at all.
+
+    Isolation: the first runs of this script executed inside FrameSW's
+    profile and scene collection — PGM-A/PGM-B, Studio Mode forced on,
+    FrameSW's own plugin attaching taps alongside ours. Creating and
+    deleting sources in someone's real production collection is rude at
+    best.
+
+    Determinism: a profile carries the audio settings. Measuring a level
+    inside a profile configured for something else means measuring through
+    whatever that profile does to audio, which is not a controlled
+    experiment. A fresh profile has OBS's defaults.
+
+    Returns what to restore, and the caller must restore it on every path.
+    """
+    step("Isolate into our own profile and scene collection")
+    prev_profile = request(ws, "GetProfileList")["responseData"]["currentProfileName"]
+    prev_coll = request(ws, "GetSceneCollectionList")["responseData"]["currentSceneCollectionName"]
+    # If a previous run died before restoring, OBS is already sitting in
+    # the test profile — and restoring "to what we found" would then be a
+    # no-op that reports success. Say so instead of quietly leaving OBS
+    # somewhere the operator did not put it.
+    if prev_profile == TEST_PROFILE or prev_coll == TEST_COLLECTION:
+        # Abort rather than run. Continuing would measure inside a
+        # half-restored state — which is exactly what produced a run of
+        # confusing FAILs — and would then "restore" OBS to the test
+        # profile, cementing the mess. There is no way to guess what the
+        # operator's real profile was.
+        sys.exit(
+            f"\n  OBS is in {prev_profile!r}/{prev_coll!r} — a previous run did not "
+            f"restore it.\n  Open OBS, switch Profile and Scene Collection back to "
+            f"your own, quit, and re-run.\n  Nothing was changed."
+        )
+
+    profiles = request(ws, "GetProfileList")["responseData"]["profiles"]
+    if TEST_PROFILE not in profiles:
+        request(ws, "CreateProfile", {"profileName": TEST_PROFILE})
+    else:
+        request(ws, "SetCurrentProfile", {"profileName": TEST_PROFILE})
+    time.sleep(2)
+
+    colls = request(ws, "GetSceneCollectionList")["responseData"]["sceneCollections"]
+    if TEST_COLLECTION not in colls:
+        request(ws, "CreateSceneCollection", {"sceneCollectionName": TEST_COLLECTION})
+    else:
+        request(ws, "SetCurrentSceneCollection", {"sceneCollectionName": TEST_COLLECTION})
+    # A collection switch tears down and rebuilds every source; give the
+    # plugin's 5s rescan a chance to see the new world before measuring.
+    time.sleep(7)
+
+    check("switched to an isolated profile", 
+          request(ws, "GetProfileList")["responseData"]["currentProfileName"] == TEST_PROFILE)
+    return prev_profile, prev_coll
+
+
+def deisolate(ws, prev):
+    """Puts OBS back exactly as it was found."""
+    if not prev:
+        return
+    prev_profile, prev_coll = prev
+    step("Restore OBS")
+    with contextlib.suppress(Exception):
+        request(ws, "SetCurrentSceneCollection", {"sceneCollectionName": prev_coll})
+        time.sleep(3)
+        request(ws, "SetCurrentProfile", {"profileName": prev_profile})
+        time.sleep(2)
+        now = request(ws, "GetProfileList")["responseData"]["currentProfileName"]
+        now_coll = request(ws, "GetSceneCollectionList")["responseData"][
+            "currentSceneCollectionName"
+        ]
+        restored = now == prev_profile and now_coll == prev_coll
+        check(
+            "restored the original profile and collection",
+            restored,
+            "" if restored else f"now {now!r}/{now_coll!r}, wanted {prev_profile!r}/{prev_coll!r}",
+        )
+
+
 def log_check():
     step("Unload cleanliness")
     logs = sorted(
@@ -321,8 +406,16 @@ def log_check():
         clean,
         "" if clean else "absent — OBS may have died before unload ran",
     )
-    # OBS writes this itself when a module crashes on the way out.
-    check("no crash reported in the OBS log", "Crash" not in text and "signal" not in text.lower())
+    # Only what OBS wrote AFTER our unload. The whole-log version failed on
+    # "Crash or unclean shutdown detected", which OBS prints at STARTUP
+    # about the previous session — so an earlier killed run made every
+    # later run report a crash that had not happened.
+    tail = text.split("[studio-mode-meters] unloaded", 1)[-1] if clean else ""
+    check(
+        "no crash after unload",
+        not any(w in tail.lower() for w in ("crash", "segmentation", "signal")),
+        tail.strip().split("\n")[0][:80] if tail.strip() else "",
+    )
     return logs[-1] if logs else None
 
 
@@ -346,8 +439,13 @@ def main():
                 break
         check("connected to obs-websocket", ws is not None)
         if ws:
-            watch_events(ws)
-            quantified_test(ws)
+            prev = None
+            try:
+                prev = isolate(ws)
+                watch_events(ws)
+                quantified_test(ws)
+            finally:
+                deisolate(ws, prev)
             ws.close()
     finally:
         step("Quit OBS")
