@@ -12,7 +12,7 @@ dependencies = [
 [[package]]
 name = "studio-mode-meters-core"
 version = "0.2.0"
-source = "git+https://github.com/hoversights/framesw-obs-plugin?rev=7292c8f#7292c8fab0c4999aacd6819a458c06eefc3aeb10"
+source = "git+https://github.com/hoversights/framesw-obs-plugin?rev=9d0fe93#9d0fe93b4b3d44e1d6d0059ccadad6e773d2de7b"
 dependencies = [
  "windows-sys",
 ]

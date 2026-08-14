@@ -1,6 +1,6 @@
 # Open findings
 
-## `active` is the wrong mechanism — RESOLVED as a design defect, 2026-08-14
+## `active` is the wrong mechanism — FIXED 2026-08-14
 
 **Not a bug in the plugin's reporting.** Measured directly: for the same
 source at the same moment, obs-websocket's own `GetSourceActive` returns
@@ -49,3 +49,39 @@ source visible in either bus, which is the distinction being asked about.
 
 Until this is done, the README's claim to distinguish Program from Preview
 is not supported by the code. **Do not publish.**
+
+
+---
+
+## Why `obs_source_active` could never have worked — measured 2026-08-14
+
+Clean collection, plain scenes, Studio Mode on, program `A` and preview
+`B`, one colour source in each, measured idle and again while **recording**
+so OBS was definitely rendering to a real output:
+
+```
+onprog : videoActive=False  videoShowing=True
+onprev : videoActive=False  videoShowing=True
+```
+
+**Both false, both showing, recording or not.** `obs_source_active()` is
+false for everything in Studio Mode, so it never distinguished the buses —
+it was not returning a wrong answer, it was returning the same answer for
+both. `obs_source_showing()` is true for both and cannot distinguish them
+either.
+
+No per-source libobs query answers "which bus". Scene membership, which is
+what the plugin now uses, is the only thing that can.
+
+### Consequence for the public API: rename the field before publishing
+
+A client that compares our `active: true` against obs-websocket's
+`GetSourceActive` will see `videoActive: false` and conclude we are wrong.
+We are not — OBS's flag is uninformative here — but the name invites
+precisely that comparison.
+
+Rename `active` to `on_program` before anyone depends on it. Blocked on a
+coordinated change: FrameSW parses the event with
+`entry.get("active")?.as_bool()?`, and `?` means a missing key fails the
+whole parse, so both repositories must change together. FrameSW never reads
+the value, only requires the key to exist.
