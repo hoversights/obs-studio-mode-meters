@@ -85,3 +85,45 @@ coordinated change: FrameSW parses the event with
 `entry.get("active")?.as_bool()?`, and `?` means a missing key fails the
 whole parse, so both repositories must change together. FrameSW never reads
 the value, only requires the key to exist.
+
+
+---
+
+## CORRECTION 2026-08-14: `obs_source_active` does work in Studio Mode
+
+The section above concluded it is "false for everything in Studio Mode".
+That is wrong, and this supersedes it.
+
+Same source, same scene, OBS 32.1.2 / obs-websocket 5.7.3:
+
+```
+studio mode OFF, source in the current scene : videoActive=True
+studio mode ON,  same source on Program      : videoActive=True
+studio mode OFF again                        : videoActive=True
+```
+
+Studio Mode is not the variable. **How the source was created is.** In this
+run it was added while Studio Mode was OFF and stayed active through the
+transition. In every earlier run it was added *while Studio Mode was
+already on*, and those read false — including while recording, so it was
+not a rendering-idle artefact.
+
+### The open question, and it may be an OBS bug
+
+A source added to the Program scene while Studio Mode is on appears never
+to gain an activation reference. If that reproduces cleanly it is worth
+reporting upstream, the same way the obs-websocket NULL-scene crash was
+(obsproject/obs-websocket#1349).
+
+Not yet isolated enough to file: it needs confirming that a Preview-only
+source reports `videoActive=false` under the same conditions, which would
+establish that the call *does* distinguish the buses when sources are
+created normally.
+
+### Does the membership fix still stand?
+
+Yes, and for a better reason than the one first given. It does not depend
+on when or how a source was added, so it cannot be caught by whatever
+causes the missing activation reference. But the earlier justification —
+"no per-source query can distinguish the buses" — is not established, and
+should not be repeated until the Preview-only case is measured.
