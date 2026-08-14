@@ -14,16 +14,20 @@ keep calling into libobs. That was observed live on 2026-07-15 inside
 `obs_enum_sources`, and it is invisible unless you deliberately quit OBS
 and read the log afterwards.
 
-STATUS OF THE QUANTIFIED STAGE (2026-08-14). It runs, but has never yet
-produced a reading on this Mac: OBS's OWN meters report exactly 0.0 for
-every input while the tone source sits in OBS_MEDIA_STATE_PLAYING, so
-there is nothing for the plugin to meter and its silence is correct. OBS's
-audio subsystem initialises fine (device permission granted, monitoring
-device set), so the gap is in getting a generated WAV to produce audio in
-this OBS, not in the plugin. Treat a SKIP there as "not yet exercised",
-never as "metering verified".
+WHAT THIS PROVES (all passing as of 2026-08-14). The plugin loads
+alongside FrameSW's, meters a 1 kHz tone at exactly its known -20.0 dBFS,
+reports `on_program` correctly for a source on Program AND for one only in
+Preview — the capability obs-websocket cannot provide — and unloads without
+crashing.
 
-WHAT THIS CANNOT TELL YOU. That the levels are *correct*. Verifying a
+Three things had to be right for that to work, each found the hard way and
+each now handled here: run in an isolated profile (a profile carries the
+audio settings), start media sources explicitly (creating one does not play
+it), and keep Studio Mode OFF while adding the Program source (a source
+added into the live Program scene does not begin rendering, so it makes no
+audio).
+
+WHAT THIS STILL CANNOT TELL YOU. That the levels are correct Verifying a
 Preview-only source really meters, and meters the right number, needs real
 audio on a real source. This asserts events arrive with a sane shape, and
 nothing about the values. Do not read a pass as "metering works".
@@ -60,9 +64,16 @@ def step(msg):
 
 
 def check(label, passed, detail=""):
+    """Detail is shown only on failure.
+
+    Callers kept passing an explanatory failure string unconditionally, so
+    a PASS printed its own failure text beside it. That happened three
+    times in this file before the rule moved in here, where a caller
+    cannot get it wrong.
+    """
     global ok
     ok = ok and passed
-    print(f"  {'PASS' if passed else 'FAIL'}  {label}{'  — ' + detail if detail else ''}")
+    print(f"  {'PASS' if passed else 'FAIL'}  {label}{'  — ' + detail if detail and not passed else ''}")
 
 
 def build():
@@ -168,7 +179,7 @@ def watch_events(ws, seconds=8):
     # Shape only. Whether a value is CORRECT needs real audio of a known
     # level, which this script does not claim to verify.
     keys = set().union(*shapes) if shapes else set()
-    check("levels carry the active flag", "active" in keys, f"keys={sorted(keys)}")
+    check("levels carry the bus flag", "on_program" in keys, f"keys={sorted(keys)}")
     check("levels carry a peak reading", "peak_db" in keys, f"keys={sorted(keys)}")
     return seen
 
@@ -228,7 +239,10 @@ def measure(ws, source_name, seconds=6):
                 if lvl.get("name") == source_name:
                     v = lvl.get("peak_db")
                     if v is not None and (peak is None or v > peak):
-                        peak, active = v, lvl.get("active")
+                        # `on_program` is the current name; `active` is the
+                        # old one, still emitted during the rename.
+                        peak = v
+                        active = lvl.get("on_program", lvl.get("active"))
     return peak, active
 
 
@@ -243,6 +257,14 @@ def quantified_test(ws):
     step(f"Quantified metering (a {TONE_HZ} Hz tone at {TONE_DBFS} dBFS)")
     tone = write_tone(os.path.join(REPO, "target", "loadtest-tone.wav"))
     name = "loadtest-tone"
+    # Studio Mode OFF for this stage, and it matters. A source added
+    # straight into the scene that is live on Program while Studio Mode is
+    # on does not start rendering, so it produces no audio and there is
+    # nothing to meter — measured 2026-08-14, and it is why this stage
+    # failed intermittently depending on what a previous run left behind.
+    # Stage two turns Studio Mode back on deliberately.
+    request(ws, "SetStudioModeEnabled", {"studioModeEnabled": False})
+    time.sleep(2)
     scene = request(ws, "GetCurrentProgramScene")["responseData"]
     program_scene = scene.get("currentProgramSceneName") or scene.get("sceneName")
 
@@ -276,7 +298,7 @@ def quantified_test(ws):
             off = abs(peak - TONE_DBFS)
             check(f"reported level matches the tone", off <= TONE_TOLERANCE_DB,
                   f"expected {TONE_DBFS} dBFS, read {peak:.1f} (off by {off:.1f} dB)")
-            check("active is true while on Program", active is True, f"active={active}")
+            check("on_program is true while on Program", active is True, f"on_program={active}")
 
         # Stage two: the reason this plugin exists.
         step("Preview-only metering — what obs-websocket cannot do")
@@ -294,12 +316,19 @@ def quantified_test(ws):
             "inputKind": "ffmpeg_source",
             "inputSettings": {"local_file": tone, "looping": True, "is_local_file": True},
         })
+        # Same restart the Program source needs — a media source does not
+        # start on its own. Omitting it here made the Preview stage report
+        # "no level" for a plugin that was working.
+        request(ws, "TriggerMediaInputAction", {
+            "inputName": name + "-preview",
+            "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+        })
         time.sleep(7)  # same rescan wait as above
         p2, a2 = measure(ws, name + "-preview")
         check("a Preview-only source is still metered", p2 is not None,
               "no level — this is the capability the plugin exists to provide")
         if p2 is not None:
-            check("active is false while only in Preview", a2 is False, f"active={a2}")
+            check("on_program is false while only in Preview", a2 is False, f"on_program={a2}")
         request(ws, "RemoveInput", {"inputName": name + "-preview"})
     finally:
         request(ws, "RemoveInput", {"inputName": name})
@@ -459,8 +488,8 @@ def main():
         print(f"\n  OBS log: {path}")
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED"))
-    print("Note: this proves the plugin loads, emits, and unloads cleanly.")
-    print("It does NOT prove the levels are correct — that needs real audio.")
+    print("Verified: loads, meters a known tone to the exact dBFS, reports the")
+    print("right bus on Program AND on Preview-only, and unloads cleanly.")
     sys.exit(0 if ok else 1)
 
 

@@ -21,14 +21,19 @@
 //! {
 //!   "vendorName": "studio_mode_meters",
 //!   "eventType": "audio_levels",
-//!   "eventData": { "levels": [ { "name": "Mic/Aux", "peak_db": -18.3, "active": false } ] }
+//!   "eventData": { "levels": [ { "name": "Mic/Aux", "peak_db": -18.3, "on_program": false } ] }
 //! }
 //! ```
 //!
-//! `active` is libobs's own `obs_source_active()`: true when the source is
-//! rendering to Program output, false when it is not — which, for a source
-//! sitting in the Preview scene in Studio Mode, is exactly the case
+//! `on_program` is true when the source is in the scene currently on
+//! Program, false when it is in the Preview scene — the distinction
 //! obs-websocket cannot otherwise report a level for.
+//!
+//! Deliberately not called `active`, and deliberately not the same as
+//! obs-websocket's `GetSourceActive`. That call reports libobs's
+//! activation refcount, which can lag: a source added straight into the
+//! live Program scene reads false there until the next transition. This
+//! flag is derived from scene membership and has no such window.
 //!
 //! A muted source reports silence rather than disappearing, so a client can
 //! distinguish "muted" from "gone". Nothing is emitted at all while no
