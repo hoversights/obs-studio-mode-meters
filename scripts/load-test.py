@@ -14,6 +14,15 @@ keep calling into libobs. That was observed live on 2026-07-15 inside
 `obs_enum_sources`, and it is invisible unless you deliberately quit OBS
 and read the log afterwards.
 
+STATUS OF THE QUANTIFIED STAGE (2026-08-14). It runs, but has never yet
+produced a reading on this Mac: OBS's OWN meters report exactly 0.0 for
+every input while the tone source sits in OBS_MEDIA_STATE_PLAYING, so
+there is nothing for the plugin to meter and its silence is correct. OBS's
+audio subsystem initialises fine (device permission granted, monitoring
+device set), so the gap is in getting a generated WAV to produce audio in
+this OBS, not in the plugin. Treat a SKIP there as "not yet exercised",
+never as "metering verified".
+
 WHAT THIS CANNOT TELL YOU. That the levels are *correct*. Verifying a
 Preview-only source really meters, and meters the right number, needs real
 audio on a real source. This asserts events arrive with a sane shape, and
@@ -115,7 +124,14 @@ def ws_connect():
         auth = base64.b64encode(hashlib.sha256((secret + a["challenge"]).encode()).digest()).decode()
     else:
         auth = None
-    ident = {"rpcVersion": 1, "eventSubscriptions": 1 << 11}  # Vendors
+    # 0x7FFFFFFF: every category including the high-volume ones.
+    #
+    # This was `1 << 11` and that is not Vendors — it is 1 << 9. With the
+    # wrong bit the script reports "no events" no matter how well the
+    # plugin works, which is the worst kind of test: one that cannot pass.
+    # Subscribing to everything removes the question entirely, and the
+    # volume is irrelevant for a script that runs for seconds.
+    ident = {"rpcVersion": 1, "eventSubscriptions": 0x7FFFFFFF}
     if auth:
         ident["authentication"] = auth
     ws.send(json.dumps({"op": 1, "d": ident}))
@@ -155,6 +171,140 @@ def watch_events(ws, seconds=8):
     check("levels carry the active flag", "active" in keys, f"keys={sorted(keys)}")
     check("levels carry a peak reading", "peak_db" in keys, f"keys={sorted(keys)}")
     return seen
+
+
+
+# A pure sine of known amplitude is what makes metering *quantifiable*:
+# 0.1 linear is exactly -20 dBFS, so a correct meter must report -20.
+TONE_DBFS = -20.0
+TONE_HZ = 1000
+# Generous, and deliberately so. This is asserting "the meter is reading the
+# real signal", not calibrating it: OBS resamples, and the peak of a sine
+# sampled at 48 kHz lands slightly under its true peak. A wrong reading
+# fails by tens of dB (silence reads -60 or worse), not by two.
+TONE_TOLERANCE_DB = 3.0
+
+
+def write_tone(path, seconds=30):
+    """A 48 kHz stereo sine at exactly TONE_DBFS, using only the stdlib."""
+    import math
+    import struct
+    import wave
+
+    rate, amp = 48000, 10 ** (TONE_DBFS / 20.0)
+    with wave.open(path, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        frames = bytearray()
+        for i in range(rate * seconds):
+            v = int(amp * 32767 * math.sin(2 * math.pi * TONE_HZ * i / rate))
+            frames += struct.pack("<hh", v, v)
+        w.writeframes(bytes(frames))
+    return path
+
+
+def request(ws, kind, data=None, rid="lt"):
+    ws.send(json.dumps({"op": 6, "d": {"requestType": kind, "requestId": rid,
+                                       "requestData": data or {}}}))
+    while True:
+        m = json.loads(ws.recv())
+        if m.get("op") == 7 and m["d"]["requestId"] == rid:
+            return m["d"]
+
+
+def measure(ws, source_name, seconds=6):
+    """Highest peak_db reported for `source_name`, and its active flag."""
+    ws.settimeout(seconds)
+    peak, active, deadline = None, None, time.time() + seconds
+    while time.time() < deadline:
+        try:
+            msg = json.loads(ws.recv())
+        except Exception:
+            break
+        d = msg.get("d", {})
+        if msg.get("op") == 5 and d.get("eventData", {}).get("vendorName") == VENDOR:
+            for lvl in d["eventData"].get("eventData", {}).get("levels", []):
+                if lvl.get("name") == source_name:
+                    v = lvl.get("peak_db")
+                    if v is not None and (peak is None or v > peak):
+                        peak, active = v, lvl.get("active")
+    return peak, active
+
+
+def quantified_test(ws):
+    """Plays a known tone and checks the reported level against it.
+
+    This is the difference between "events arrive" and "metering works".
+    Stage two is the one that justifies the plugin existing at all: a source
+    that is ONLY in the Preview scene still meters, which is exactly what
+    obs-websocket cannot report on its own.
+    """
+    step(f"Quantified metering (a {TONE_HZ} Hz tone at {TONE_DBFS} dBFS)")
+    tone = write_tone(os.path.join(REPO, "target", "loadtest-tone.wav"))
+    name = "loadtest-tone"
+    scene = request(ws, "GetCurrentProgramScene")["responseData"]
+    program_scene = scene.get("currentProgramSceneName") or scene.get("sceneName")
+
+    created = request(ws, "CreateInput", {
+        "sceneName": program_scene,
+        "inputName": name,
+        "inputKind": "ffmpeg_source",
+        "inputSettings": {"local_file": tone, "looping": True, "is_local_file": True},
+    })
+    # Creating a media source does not start it — measured here, and the
+    # same invariant FrameSW follows for every media shot it stages.
+    # Without this the source sits in OBS_MEDIA_STATE_NONE forever.
+    request(ws, "TriggerMediaInputAction", {
+        "inputName": name, "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+    })
+    if not created.get("requestStatus", {}).get("result"):
+        check("created a test-tone source", False,
+              created.get("requestStatus", {}).get("comment", "")[:80])
+        return
+    try:
+        # The plugin discovers new sources on a 5s rescan (50 x 100ms in
+        # spawn_periodic_rescan), so a freshly created source is invisible
+        # to it for up to five seconds. Waiting 2s made the first run of
+        # this test report "no level" for a plugin that was working
+        # perfectly.
+        time.sleep(7)
+        peak, active = measure(ws, name)
+        check("the tone is metered on Program", peak is not None,
+              "no level reported for the source")
+        if peak is not None:
+            off = abs(peak - TONE_DBFS)
+            check(f"reported level matches the tone", off <= TONE_TOLERANCE_DB,
+                  f"expected {TONE_DBFS} dBFS, read {peak:.1f} (off by {off:.1f} dB)")
+            check("active is true while on Program", active is True, f"active={active}")
+
+        # Stage two: the reason this plugin exists.
+        step("Preview-only metering — what obs-websocket cannot do")
+        request(ws, "SetStudioModeEnabled", {"studioModeEnabled": True})
+        time.sleep(1)
+        scenes = [s["sceneName"] for s in request(ws, "GetSceneList")["responseData"]["scenes"]]
+        other = next((s for s in scenes if s != program_scene), None)
+        if other is None:
+            print("  SKIP  needs a second scene to stage into; only one exists")
+            return
+        request(ws, "SetCurrentPreviewScene", {"sceneName": other})
+        # Move the tone into the scene that is now Preview only.
+        request(ws, "CreateInput", {
+            "sceneName": other, "inputName": name + "-preview",
+            "inputKind": "ffmpeg_source",
+            "inputSettings": {"local_file": tone, "looping": True, "is_local_file": True},
+        })
+        time.sleep(7)  # same rescan wait as above
+        p2, a2 = measure(ws, name + "-preview")
+        check("a Preview-only source is still metered", p2 is not None,
+              "no level — this is the capability the plugin exists to provide")
+        if p2 is not None:
+            check("active is false while only in Preview", a2 is False, f"active={a2}")
+        request(ws, "RemoveInput", {"inputName": name + "-preview"})
+    finally:
+        request(ws, "RemoveInput", {"inputName": name})
+        with contextlib.suppress(Exception):
+            os.remove(tone)
 
 
 def log_check():
@@ -197,6 +347,7 @@ def main():
         check("connected to obs-websocket", ws is not None)
         if ws:
             watch_events(ws)
+            quantified_test(ws)
             ws.close()
     finally:
         step("Quit OBS")
