@@ -127,3 +127,48 @@ on when or how a source was added, so it cannot be caught by whatever
 causes the missing activation reference. But the earlier justification —
 "no per-source query can distinguish the buses" — is not established, and
 should not be repeated until the Preview-only case is measured.
+
+
+---
+
+## SETTLED 2026-08-14: the call works; the anomaly is creation-order
+
+Both sources created with Studio Mode OFF, so both activated normally,
+then Studio Mode enabled. OBS 32.1.2 / obs-websocket 5.7.3:
+
+```
+studio ON, program=A preview=B
+   srcA (Program): videoActive=True   videoShowing=True
+   srcB (Preview): videoActive=False  videoShowing=True
+
+swapped:   program=B preview=A
+   srcA: videoActive=False  srcB: videoActive=True
+```
+
+`obs_source_active` distinguishes Program from Preview correctly, and
+follows a TAKE. It is the right call for this job, and every earlier
+conclusion here that said otherwise was measuring one specific anomaly and
+generalising from it.
+
+**The anomaly, precisely:** a source created via obs-websocket's
+`CreateInput` *while Studio Mode is already on* never gains an activation
+reference — it reads `videoActive=false` on the Program scene indefinitely,
+including while recording. A source created before Studio Mode is enabled
+behaves correctly.
+
+Still unknown, and required before filing upstream: whether adding a source
+through the OBS **UI** while in Studio Mode has the same problem. If it
+does, it is a libobs issue; if not, it belongs to obs-websocket's
+`CreateInput`.
+
+### Why the plugin keeps scene membership anyway
+
+Not because `obs_source_active` is wrong — it is not. Because the anomaly
+lands exactly where operators live: **adding a source during a show, with
+Studio Mode on.** Such a source would meter correctly and report the wrong
+bus forever. Membership does not care when or how a source was added.
+
+The cost is that our `active` will disagree with `GetSourceActive` in that
+one case — ours right, OBS's stale. That is the correct side to be on, and
+it strengthens the case for renaming the field to `on_program` so nobody
+reads the two as the same claim.
