@@ -24,10 +24,13 @@ Drop the plugin into OBS's plugin directory and restart OBS.
 |---|---|
 | macOS | `~/Library/Application Support/obs-studio/plugins/` |
 | Windows | `C:\ProgramData\obs-studio\plugins\` |
-| Linux | `~/.config/obs-studio/plugins/` |
 
 On macOS the plugin is a `.plugin` bundle; on Windows a folder containing
 `bin/64bit/*.dll`. Requires **obs-websocket**, which ships with OBS 28+.
+
+Linux is not listed because it has never been built or tested here. The code
+has nothing platform-specific outside `platform.rs`, so it may well work —
+but that is a guess, and a guess does not belong in an install table.
 
 Confirm it loaded — OBS's log will contain:
 
