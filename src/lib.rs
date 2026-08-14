@@ -21,14 +21,19 @@
 //! {
 //!   "vendorName": "studio_mode_meters",
 //!   "eventType": "audio_levels",
-//!   "eventData": { "levels": [ { "name": "Mic/Aux", "peak_db": -18.3, "program": false } ] }
+//!   "eventData": { "levels": [ { "name": "Mic/Aux", "peak_db": -18.3, "active": false } ] }
 //! }
 //! ```
 //!
-//! `program` distinguishes the two buses: `true` for a source on the
-//! Program scene, `false` for one on Preview. A muted source reports
-//! silence rather than disappearing, so a client can tell "muted" from
-//! "gone".
+//! `active` is libobs's own `obs_source_active()`: true when the source is
+//! rendering to Program output, false when it is not — which, for a source
+//! sitting in the Preview scene in Studio Mode, is exactly the case
+//! obs-websocket cannot otherwise report a level for.
+//!
+//! A muted source reports silence rather than disappearing, so a client can
+//! distinguish "muted" from "gone". Nothing is emitted at all while no
+//! source is producing audio — an idle OBS is silent on this channel by
+//! design, not broken.
 
 use std::ffi::{c_char, c_void};
 use studio_mode_meters_core::{calldata, metering, set_identity, Identity};
