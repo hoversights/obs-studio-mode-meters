@@ -1,0 +1,27 @@
+[package]
+name = "obs-studio-mode-meters"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# Loaded into OBS Studio's process and calls libobs, so it is bound by
+# OBS's own licence.
+license = "GPL-2.0-or-later"
+description = "OBS Studio plugin: per-source audio metering that distinguishes Program from Preview in Studio Mode, over obs-websocket."
+repository = "https://github.com/hoversights/obs-studio-mode-meters"
+
+[lib]
+name = "obs_studio_mode_meters"
+crate-type = ["cdylib"]
+
+# The metering engine, shared for now with the plugin it was extracted
+# from so a fix lands in both while this is still moving. Pinned to a
+# revision rather than tracking a branch: a change over there must never
+# ship into a stranger's OBS because someone pushed to main.
+#
+# This dependency is TEMPORARY BY DESIGN. Once this plugin is proven in a
+# real OBS, core is copied in here and the dependency deleted — see
+# PLUGIN_SPLIT_PLAN.md's 2026-08-14 decision. After that, an FFI fix must
+# be applied in both repositories.
+[dependencies.studio-mode-meters-core]
+git = "https://github.com/hoversights/framesw-obs-plugin"
+rev = "7292c8f"
