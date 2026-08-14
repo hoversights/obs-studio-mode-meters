@@ -172,3 +172,31 @@ The cost is that our `active` will disagree with `GetSourceActive` in that
 one case — ours right, OBS's stale. That is the correct side to be on, and
 it strengthens the case for renaming the field to `on_program` so nobody
 reads the two as the same claim.
+
+
+---
+
+## CLOSED 2026-08-14: not an OBS bug, not worth filing
+
+The UI check settled it, then isolating the real variable settled it
+further. `uitest`, added through OBS's UI in Studio Mode and transitioned
+to Program, read `videoActive=True`. So did `ws_taken`, added through
+obs-websocket into Preview and then transitioned. The API is not the
+variable.
+
+| how the source got there | result |
+|---|---|
+| into Preview, then transitioned (UI or API) | correct immediately |
+| directly into the live Program scene (API only) | false until the next transition, then self-corrects |
+
+It recovers: after one transition cycle `ws_direct` read `videoActive=True`,
+and stayed correct with Studio Mode off.
+
+**No upstream report.** It is transient staleness that fixes itself, and it
+is only reachable through the API — OBS's UI does not let you add a source
+to the Program scene while Studio Mode is on. Earlier notes in this file
+implying a libobs bug were premature.
+
+**Membership stays**, on modest grounds rather than the sweeping ones
+claimed earlier: it is immune to that window and now costs nothing. With
+FrameSW driving transitions the window would close on the next TAKE anyway.
