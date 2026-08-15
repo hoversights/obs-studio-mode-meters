@@ -1,0 +1,16 @@
+# Normalise to LF in the repository; Git checks out native line endings.
+* text=auto
+
+# PowerShell 5.1 is the target for the Windows packager, and it is fussy:
+# a .ps1 that arrives with LF-only endings can fail in ways that read as a
+# syntax error. Force CRLF on checkout so a Windows clone always gets a
+# file PowerShell is happy with, whichever platform committed it.
+*.ps1 text eol=crlf
+
+# Shell scripts must never gain CRLF — a stray \r after the shebang makes
+# the kernel look for an interpreter that does not exist, and the error
+# ("bad interpreter") does not mention line endings at all.
+*.sh text eol=lf
+
+*.png binary
+*.zip binary

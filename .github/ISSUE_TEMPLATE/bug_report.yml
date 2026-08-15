@@ -1,0 +1,53 @@
+name: Something isn't working
+description: The plugin loads but misbehaves, or does not load at all.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most reports come down to three things, so they are asked for up
+        front rather than in a round trip: which OBS, which platform, and
+        what OBS's own log says.
+
+  - type: input
+    id: obs
+    attributes:
+      label: OBS Studio version
+      description: Help → About
+      placeholder: "32.1.2"
+    validations: {required: true}
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS (Apple Silicon), macOS (Intel), Windows, Linux]
+    validations: {required: true}
+
+  - type: textarea
+    id: log
+    attributes:
+      label: The plugin's log lines
+      description: >
+        Help → Log Files → View Current Log, then search for
+        "studio-mode-meters". Paste every line that matches, even if there
+        are none — "none" is itself the answer to "did it load".
+      render: text
+    validations: {required: true}
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations: {required: true}
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before filing
+      description: >
+        Each of these is normal behaviour that looks like a fault, and each
+        accounts for real reports.
+      options:
+        - label: obs-websocket is enabled (Tools → WebSocket Server Settings)
+        - label: Something in OBS is actually producing audio — with none, this plugin correctly emits nothing
+        - label: I waited ~5 seconds after adding a source, which is how often it rescans
