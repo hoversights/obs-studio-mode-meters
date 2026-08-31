@@ -20,6 +20,13 @@ $Dll       = "$PluginDir\bin\64bit\$Name.dll"
 $VersionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
 $Version = $VersionLine.Matches.Groups[1].Value
 
+# Keep the builder's home directory out of the shipped binary. rustc embeds
+# absolute source paths in panic metadata, so an unconfigured build ships
+# `C:\Users\<name>\.rustup\...` to everyone who downloads it. See
+# package-macos.sh for the longer note; `[profile.release] trim-paths` would
+# be the natural home for this and is unstable in Cargo 1.95.0.
+$env:RUSTFLAGS = "$($env:RUSTFLAGS) --remap-path-prefix=$($env:USERPROFILE)=~ --remap-path-prefix=$($PWD.Path)=."
+
 Write-Host "==> Building $Name $Version (release)"
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }

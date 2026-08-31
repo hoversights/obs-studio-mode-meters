@@ -28,7 +28,7 @@ It only behaves if it starts from a known state:
 
 ```powershell
 # 1. Get the current code
-cd C:\Users\coinb\obs-studio-mode-meters   # or wherever the clone lives
+cd <wherever the clone lives>\obs-studio-mode-meters
 git pull
 
 # 2. One-time, if needed

@@ -112,10 +112,18 @@ jobs:
             exit 1
           fi
           KEY_PATH="$RUNNER_TEMP/notary.p8"
-          echo "$APPLE_API_KEY" | base64 --decode -o "$KEY_PATH"
-          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
-          echo "APPLE_API_ISSUER_ID=$APPLE_API_ISSUER_ID" >> "$GITHUB_ENV"
+          # umask before writing: the decoded private key should not be
+          # group- or world-readable even for the life of one job.
+          (umask 077; echo "$APPLE_API_KEY" | base64 --decode -o "$KEY_PATH")
+          # Heredoc form, not `echo NAME=$VALUE`. A value containing a
+          # newline would otherwise inject arbitrary further variables into
+          # every later step. These are owner-set IDs so the risk is
+          # theoretical, but the safe form is the same length.
+          {
+            echo "APPLE_API_KEY_PATH=$KEY_PATH"
+            printf 'APPLE_API_KEY_ID<<__EOF__\n%s\n__EOF__\n' "$APPLE_API_KEY_ID"
+            printf 'APPLE_API_ISSUER_ID<<__EOF__\n%s\n__EOF__\n' "$APPLE_API_ISSUER_ID"
+          } >> "$GITHUB_ENV"
 
       - name: Build and sign universal plugin
         run: ./scripts/package-macos.sh --release "$SIGN_IDENTITY"

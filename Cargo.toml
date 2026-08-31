@@ -16,6 +16,12 @@ repository = "https://github.com/hoversights/obs-studio-mode-meters"
 name = "obs_studio_mode_meters"
 crate-type = ["cdylib"]
 
+# NOTE: path scrubbing for released binaries is NOT configured here.
+# `[profile.release] trim-paths` would be the natural home for it, but it
+# is still unstable in the pinned Cargo (1.95.0) and fails the build
+# outright. The packaging scripts set `--remap-path-prefix` instead, which
+# is stable — see scripts/package-macos.sh.
+
 # The metering engine, now a local crate. It used to be a git dependency on
 # `hoversights/framesw-obs-plugin`, pinned to rev a32dcac; that was always
 # temporary, and cutting it was the condition for publishing. A plugin

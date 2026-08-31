@@ -53,6 +53,23 @@ NAME="studio-mode-meters"
 BUNDLE="target/${NAME}.plugin"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
 
+# Keep the builder's home directory out of the shipped binary.
+#
+# rustc embeds absolute source paths in panic metadata, so an unconfigured
+# build ships strings like
+# `/Users/<name>/.rustup/toolchains/.../library/std/src/sync/once.rs` to
+# everyone who downloads it. Small, but it is a real name in a binary that
+# strangers load into their own process, and it costs one flag to avoid.
+#
+# `[profile.release] trim-paths` is the natural way to do this and is still
+# unstable in Cargo 1.95.0 — it fails the build rather than warning. This
+# is the stable equivalent. Appended, not assigned, so an existing RUSTFLAGS
+# is not silently discarded.
+#
+# Deliberately NOT `strip`: symbols are what make an OBS crash report
+# readable, which matters most for a plugin inside someone's live stream.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${HOME}=~ --remap-path-prefix=${PWD}=."
+
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS"
 
