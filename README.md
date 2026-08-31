@@ -84,6 +84,12 @@ Subscribe with the `Vendors` event category (`1 << 9`). A client subscribed to
 - **Sources appear within about five seconds of being added.** The plugin
   rescans on that cadence; a source created a moment ago is not missing, just
   not yet seen.
+- **A source appears only once its bus is known.** Until the plugin has seen
+  it in the Program or Preview scene it is left out of the payload entirely,
+  rather than being reported with a guessed `on_program`. So every
+  `on_program` you receive is one the plugin can stand behind — but a brand
+  new source is briefly absent rather than briefly wrong. A source in a scene
+  that is on neither bus is likewise not reported.
 
 ### `on_program` is not obs-websocket's `GetSourceActive`
 

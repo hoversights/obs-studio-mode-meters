@@ -1,6 +1,61 @@
 # Open findings
 
-## BLOCKER 2026-08-31: `on_program` cannot distinguish "Preview" from "don't know"
+## FIXED 2026-08-31: `on_program` was wrong for a source on Program
+
+Two independent defects, found together, fixed separately. The second is
+the one that nearly shipped a lie; the first is the one that was actually
+producing the wrong answer.
+
+**1. The bus map was built from scene roles up to 5 seconds old.**
+`attach_scene_audio_taps` queued the UI-thread role read *without waiting*
+and then immediately read the cache — so it always used the previous
+cycle's answer. `refresh_source_bus` now runs inside
+`cache_scene_roles_on_ui_thread`, holding the names that task just read, so
+the map can never disagree with the roles it was built from. The old
+comment calling one cycle of staleness "harmless" was wrong: harmless for
+the taps, which only decide where audio is sampled; the entire answer for
+the bus map, which decides what the event claims.
+
+**This was the cause of the observed failure.** Isolated by reintroducing
+the `.unwrap_or(false)` below on top of the staleness fix: the load test
+then passed, which proves the staleness alone produced the wrong reading.
+
+**2. `source_is_on_program` conflated "unknown" with "Preview".** Now
+`source_bus() -> Option<bool>`, and the emit loop DROPS a source whose bus
+is unknown rather than sending a guessed flag. A level is only emitted once
+the plugin can stand behind the bus on it.
+
+### The load test does NOT cover defect 2 — read this before trusting it
+
+With the staleness fixed, `SOURCE_BUS` is always populated by the time the
+load test measures, so the missing-key path is never taken. Verified by
+deliberately reintroducing `.unwrap_or(false)` and re-running: **the load
+test passed.** It cannot catch that defect, and claiming otherwise would
+repeat the mistake this whole entry is about.
+
+Covered instead by three unit tests in `metering.rs` (`bus_tests`), each
+checked against the broken behaviour first and observed to fail with
+`left: Some(false), right: None`.
+
+### Verified on a clean baseline
+
+Leftover test profile and collection removed first, so OBS created both
+fresh — the same starting state any other machine has. macOS, OBS 32.1.2:
+
+```
+baseline: collection 'studio-mode-meters-test', 1 scene(s): ['Scene']
+PASS  the tone is metered on Program
+PASS  reported level matches the tone
+PASS  on_program is true while on Program
+PASS  a Preview-only source is still metered
+PASS  on_program is false while only in Preview
+```
+
+Still outstanding: **Windows has not re-run since the fix.**
+
+---
+
+## The original report, kept for the reasoning
 
 **Do not release, and do not claim Preview-only metering is verified — on
 either platform.**

@@ -211,7 +211,7 @@ pub static THREADS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::ne
 /// human/UI-appropriate cadence. `active` is the whole point of this
 /// plugin existing — it's exactly what `InputVolumeMeters` can't report
 /// for Preview-only content.
-pub static LEVELS: Mutex<Option<HashMap<String, (f32, bool)>>> = Mutex::new(None);
+pub static LEVELS: Mutex<Option<HashMap<String, (f32, Option<bool>)>>> = Mutex::new(None);
 
 pub extern "C" fn audio_capture_callback(
     param: *mut c_void,
@@ -272,8 +272,10 @@ pub fn audio_capture_callback_impl(
         CStr::from_ptr(ptr).to_string_lossy().into_owned()
     };
     // Bus by scene membership, not `obs_source_active(source)` — see
-    // `SOURCE_BUS` for the measurement that retired that call.
-    let active = source_is_on_program(&name);
+    // `SOURCE_BUS` for the measurement that retired that call. `None` here
+    // means "not seen in either scene yet", and is carried as such rather
+    // than flattened into `false`.
+    let bus = source_bus(&name);
 
     // Preview-layer monitor taps (`audio_tap.rs`) — reuses this exact
     // callback (already attached to every source, unconditionally) rather
@@ -287,7 +289,7 @@ pub fn audio_capture_callback_impl(
     // degrade to `forward_if_tapped` doing nothing, same as every other
     // best-effort path in this crate.
     if let Ok(mut guard) = LEVELS.lock() {
-        guard.get_or_insert_with(HashMap::new).insert(name, (peak_db, active));
+        guard.get_or_insert_with(HashMap::new).insert(name, (peak_db, bus));
     }
 }
 
@@ -384,8 +386,23 @@ pub extern "C" fn cache_scene_roles_on_ui_thread(_param: *mut c_void) {
             let program = frontend_scene_name(obs_frontend_get_current_scene());
             let preview = frontend_scene_name(obs_frontend_get_current_preview_scene());
             if let Ok(mut cached) = CACHED_SCENE_ROLES.lock() {
-                *cached = Some((program, preview));
+                *cached = Some((program.clone(), preview.clone()));
             }
+            // Rebuild the bus map HERE, holding the names that were just
+            // read, rather than back on the rescan thread from the cache.
+            //
+            // This used to happen in `attach_scene_audio_taps`, which
+            // queues this task without waiting and then immediately reads
+            // the cache — so it always built the map from the PREVIOUS
+            // cycle's roles, up to 5 seconds old. Measured 2026-08-31: with
+            // Studio Mode switched off mid-test, the rescan walked the one
+            // scene as *Preview* using the stale roles and marked a source
+            // sitting on Program as not-on-Program. The old comment calling
+            // one cycle of staleness "harmless" was wrong — it is harmless
+            // for the taps, which only decide where audio is sampled, and
+            // it is the whole answer for the bus map, which decides what
+            // the event claims.
+            refresh_source_bus(program.as_deref(), preview.as_deref());
         }),
     );
 }
@@ -459,12 +476,25 @@ pub fn refresh_source_bus(program: Option<&str>, preview: Option<&str>) {
 }
 
 /// Which bus a source is on, or false when it is on neither/unknown.
-pub fn source_is_on_program(name: &str) -> bool {
+/// `Some(true)` on Program, `Some(false)` on Preview, **`None` when the bus
+/// is not known** — the source has not been seen in either scene yet.
+///
+/// The `None` case is the point. This returned a bare `bool` ending in
+/// `.unwrap_or(false)`, so a source the plugin had never walked reported
+/// exactly what a genuinely Preview-only source reports. Those are not the
+/// same claim, and a client cannot tell them apart, which made the one
+/// capability this plugin exists to provide impossible to verify: an
+/// assertion that "a Preview source reads false" passes just as well when
+/// the plugin knows nothing at all.
+///
+/// Same mistake as the `active` field this replaced — a field whose name
+/// promises more than the value behind it knows. Caught before release
+/// again, on 2026-08-31, and this time the type makes it unrepresentable.
+pub fn source_bus(name: &str) -> Option<bool> {
     SOURCE_BUS
         .lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(name).copied()))
-        .unwrap_or(false)
 }
 
 pub fn attach_scene_audio_taps() {
@@ -489,9 +519,11 @@ pub fn attach_scene_audio_taps() {
     };
     attach_role_tap("program", program.as_deref(), &ATTACHED_PROGRAM_SCENE);
     attach_role_tap("preview", preview.as_deref(), &ATTACHED_PREVIEW_SCENE);
-    // Rebuilt here, where the two roles have just been resolved, so the
-    // bus map and the taps can never describe different scenes.
-    refresh_source_bus(program.as_deref(), preview.as_deref());
+    // `refresh_source_bus` is deliberately NOT called here any more. It now
+    // runs inside `cache_scene_roles_on_ui_thread`, with the names that
+    // task just read. The snapshot above is up to one cycle old, which is
+    // fine for deciding where to sample audio and was NOT fine for deciding
+    // what bus to report — see that function.
 }
 
 /// Moves one role's audio tap to `scene`, detaching from whatever that role
@@ -623,7 +655,20 @@ pub fn spawn_emit_loop() {
             guard
                 .get_or_insert_with(HashMap::new)
                 .drain()
-                .map(|(name, (peak_db, on_program))| SourceLevel { name, peak_db, on_program })
+                // A source whose bus is not known yet is DROPPED, not
+                // emitted with a guessed flag. `on_program` is the only
+                // reason a client uses this plugin, so a value it cannot
+                // stand behind must not be sent at all — the alternative
+                // is a confident-looking `false` that means "no idea",
+                // which is what shipped until 2026-08-31.
+                //
+                // Consistent with what the README already promises: a
+                // source appears within about five seconds of being added,
+                // because that is the rescan cadence. This just means it
+                // appears when its bus is known rather than before.
+                .filter_map(|(name, (peak_db, bus))| {
+                    bus.map(|on_program| SourceLevel { name, peak_db, on_program })
+                })
                 .collect()
         };
         if drained.is_empty() {
@@ -691,5 +736,49 @@ pub fn shutdown() {
     };
     for handle in handles {
         let _ = handle.join();
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use super::*;
+
+    /// The load test CANNOT cover this, which is why it is here.
+    ///
+    /// Measured 2026-08-31: with the staleness fix in place, `SOURCE_BUS`
+    /// is always populated by the time the load test measures, so the
+    /// missing-key path is never taken and the load test passed against a
+    /// deliberately reintroduced `.unwrap_or(false)`. A test that cannot
+    /// fail is worse than no test, so the guarantee is asserted directly
+    /// on the function instead.
+    fn set_bus(entries: &[(&str, bool)]) {
+        let mut guard = SOURCE_BUS.lock().unwrap();
+        *guard = Some(entries.iter().map(|(n, b)| (n.to_string(), *b)).collect());
+    }
+
+    #[test]
+    fn an_unknown_source_is_none_not_false() {
+        set_bus(&[("on-program", true), ("on-preview", false)]);
+        // The whole point: "not seen yet" must not be reportable as
+        // "staged in Preview". Those are different claims and a client
+        // cannot tell them apart once both are `false`.
+        assert_eq!(source_bus("never-walked"), None);
+        assert_eq!(source_bus("on-preview"), Some(false));
+        assert_eq!(source_bus("on-program"), Some(true));
+    }
+
+    #[test]
+    fn an_empty_map_still_answers_none() {
+        set_bus(&[]);
+        assert_eq!(source_bus("anything"), None);
+    }
+
+    #[test]
+    fn a_never_initialised_map_answers_none() {
+        // Before the first rescan completes there is no map at all. That
+        // is the widest window in which a level could be emitted with a
+        // fabricated bus, so it is asserted explicitly.
+        *SOURCE_BUS.lock().unwrap() = None;
+        assert_eq!(source_bus("anything"), None);
     }
 }
