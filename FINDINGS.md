@@ -1,5 +1,65 @@
 # Open findings
 
+## CORRECTION 2026-08-31: OBS's mixer DOES show and control staged sources
+
+**This supersedes the README's original framing and it narrows what this
+plugin is for.** The claim was that OBS "cannot answer" whether a
+Preview-staged source is producing audio. In OBS's own Audio Mixer it
+plainly can: a Preview-scene source is listed, badged `Preview`, with a
+live meter, a working fader, and mute and monitor buttons. Seen directly in
+the OBS window, not inferred.
+
+Three things were measured to pin down what is and is not true:
+
+**1. A source in a scene that is on neither bus makes no sound.**
+
+```
+Monitor Only accepted : True      videoActive : False
+INACTIVE : no level               ACTIVE : -20.00 dBFS
+```
+
+**2. A Preview-staged source's fader and mute work exactly.** Volume driven
+through the same API the OBS fader uses, measured through this plugin:
+
+```
+volume 1.00  (0 dB)  -> -20.00 dBFS
+volume 0.50  (-6 dB) -> -26.02 dBFS      drop  6.0 dB
+volume 0.25 (-12 dB) -> -32.04 dBFS      drop 12.0 dB
+muted                -> -100.0 dBFS
+```
+
+**3. But obs-websocket does NOT report it.** Same source, seconds apart:
+
+```
+LIVE    : InputVolumeMeters reports ['staged-tone']  -20.00 dBFS
+PREVIEW : InputVolumeMeters reports []               nothing
+```
+
+### What this changes
+
+- **The gap is on the WIRE, not on the screen.** An operator looking at OBS
+  can already see and adjust a staged source. A *client* — control surface,
+  Stream Deck plugin, hardware panel, another switcher UI — cannot, because
+  `InputVolumeMeters` covers the output mix only.
+- **A meter/mixer dock in OBS is not worth building.** It would duplicate
+  the Audio Mixer sitting a few inches away. This was seriously considered
+  and is dropped on the evidence.
+- **The audience is integrators, not end users.** The plugin has no UI and
+  needs a client to be useful at all, which is consistent with that.
+
+### How the wrong belief survived so long
+
+`PLUGIN_SPLIT_PLAN.md` asserted it in 2026-08-08 and parked the bench test
+meant to check it (Phase 0.5, Test B). Everything downstream — this repo's
+README, the framing of FrameSW's monitoring — was built on the unchecked
+assertion. It was settled in minutes by looking at the OBS window, which no
+one had done.
+
+**The measurable half of the claim is true and is what the README now
+says.** It was the *scope* that was wrong: "OBS cannot show you this"
+should always have been "obs-websocket cannot tell your client this."
+
+
 ## MEASURED 2026-08-31: an inactive source produces no audio, and Monitor Only does not change that
 
 The premise this plugin rests on, and which `PLUGIN_SPLIT_PLAN.md` asserted

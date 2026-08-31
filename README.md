@@ -3,13 +3,26 @@
 An OBS Studio plugin that reports **per-source audio levels, separated by
 Program and Preview**, over obs-websocket.
 
-OBS already meters audio, but it meters what is going *out*. In Studio Mode the
-thing an operator needs before cutting is different: is the source I am about to
-take live producing audio *right now*, while it is still only in Preview? OBS's
-own meters cannot answer that — a Preview-only source is not in the output mix,
-so it never appears in `InputVolumeMeters` at all.
+**Who this is for: people building on obs-websocket.** If you just want to
+*look* at a staged source's level yourself, you do not need this plugin —
+OBS's own Audio Mixer already shows Preview-scene sources, with a meter, a
+fader and a mute button. Measured 2026-08-31, and worth saying plainly
+because an earlier version of this README claimed otherwise.
 
-This plugin answers it, and does nothing else.
+What OBS does **not** do is put those levels on the wire. Its
+`InputVolumeMeters` event covers the output mix only, so a source staged in
+Preview is absent from it entirely. Measured on the same source, seconds
+apart:
+
+```
+LIVE    : InputVolumeMeters reports ['staged-tone']  -20.00 dBFS
+PREVIEW : InputVolumeMeters reports []               nothing
+```
+
+So if you are writing a client — a control surface, a Stream Deck plugin, a
+hardware panel, your own switcher UI — there is no way to know whether the
+source you are about to cut to is producing audio. This plugin provides
+that, and does nothing else.
 
 - **Read-only.** It attaches audio capture callbacks and reports what it hears.
   It creates nothing, renames nothing, changes no setting.
