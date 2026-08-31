@@ -1,5 +1,65 @@
 # Open findings
 
+## OPEN 2026-08-31: Preview-only metering fails on WINDOWS when FrameSW's plugin is also installed
+
+**Windows only. macOS is unaffected, and that is measured, not assumed.**
+
+Reported from the Windows machine after the `on_program` fix landed. Three
+runs, one variable changed each time:
+
+| run | `framesw-companion` | preview wait | Preview-only result |
+|---|---|---|---|
+| 1 | installed | 7s | FAIL — no level |
+| 2 | installed | 20s | FAIL — no level |
+| 3 | absent | 7s | **PASS** |
+
+Run 2 rules out timing: the tap was live 14.7 seconds before measurement
+and still read nothing. Run 3 isolates the cause to co-existence.
+
+Also established there, and worth keeping because it closes off the
+obvious suspects: no symbol-resolution failure appears in any log, and
+Studio Mode Meters attaches its taps correctly every time — including to
+the right Preview scene, 33ms after FrameSW attaches to the same one. So
+the Windows enumerate-every-module resolution path is exercised and works.
+
+### macOS does the same thing and passes
+
+From the OBS log of the passing macOS run on 2026-08-30 (20-03-17), with
+both plugins installed and loaded:
+
+```
+20:03:18.048  [studio-mode-meters] loaded
+20:03:18.049  [framesw] registered as obs-websocket vendor "framesw"
+20:03:59.282  [framesw]             attached real audio tap to preview scene 'loadtest-preview'
+20:03:59.452  [studio-mode-meters]  attached real audio tap to preview scene 'loadtest-preview'
+```
+
+Both plugins, both tapping the same Preview-only scene 170ms apart, and the
+stage passed.
+
+**This matters for where to look.** "Two audio capture callbacks on an
+inactive source" is not on its own the mechanism — that is exactly what
+macOS does here, and it works. Whatever this is, it is specific to Windows.
+
+### Why it is not a release blocker, and is not nothing either
+
+Most people installing a community metering plugin will not have
+`framesw-companion`. But FrameSW's own users are precisely the people who
+would have both, so this cannot go undocumented.
+
+Not yet measured, and not guessed at here. The next step is to establish
+what libobs on Windows does with a second `obs_source_add_audio_capture_callback`
+on a source that is not active — measured, not reasoned about.
+
+### What it already changed
+
+`scripts/load-test.py` now prints every other installed plugin at the
+Install step. The test isolates the profile and the scene collection but
+NOT the plugin directory, so its result depends on what else is present —
+invisible on a machine where that set never changes, and it inverted the
+outcome here.
+
+
 ## FIXED 2026-08-31: `on_program` was wrong for a source on Program
 
 Two independent defects, found together, fixed separately. The second is

@@ -142,6 +142,24 @@ whatever you had. Requires `websocket-client`.
 The unload check matters most: the dangerous failure for an OBS plugin is not
 "no events", which you notice, but a crash on shutdown, which you do not.
 
+## Known issue: Windows, alongside the FrameSW Companion Plugin
+
+If you have **both** this plugin and the [FrameSW Companion
+Plugin](https://github.com/hoversights/framesw-obs-plugin) installed **on
+Windows**, Preview-only metering stops working here — a source staged in
+Preview reports no level at all. Program metering is unaffected, and so is
+everything else.
+
+Measured 2026-08-31: removing the other plugin and changing nothing else
+makes it work. A 20-second wait does not, so it is not the rescan cadence.
+**macOS with both installed is unaffected** — verified with both plugins
+tapping the same Preview scene 170ms apart.
+
+The mechanism is not yet established and is being investigated rather than
+guessed at; see `FINDINGS.md`. If you only need one of the two on Windows,
+install one. You do not need both: the FrameSW plugin already reports the
+same levels to its own application.
+
 ## Tested against
 
 | | |

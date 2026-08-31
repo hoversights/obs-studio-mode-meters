@@ -131,9 +131,48 @@ def build():
     return BUILT_LIB
 
 
+def report_other_plugins():
+    """Names every OTHER plugin OBS will load, because this test does not isolate them.
+
+    WHAT THIS TEST ISOLATES: the profile and the scene collection.
+    WHAT IT DOES NOT: the plugin directory. Whatever else is installed
+    loads into the same OBS and taps the same scenes.
+
+    That gap inverted a result on 2026-08-31. On Windows, with
+    `framesw-companion` installed, the Preview-only stage failed with no
+    level; removing that plugin and changing nothing else made it pass.
+    Three runs, one variable each, with a 20-second wait ruling out timing.
+    The same co-existence on macOS passes — verified from the OBS log, both
+    plugins attaching to the same Preview-only scene 170ms apart — so it is
+    a platform difference, not "two taps on one scene".
+
+    Isolating this directory is deliberately NOT done: moving someone's
+    other plugins aside is invasive and would itself change what is being
+    measured. Printing them costs nothing and turns an invisible confound
+    into a line in the output.
+    """
+    others = []
+    with contextlib.suppress(Exception):
+        for entry in sorted(os.listdir(PLUGIN_DIR)):
+            # Our own bundle, debug symbols, and dotfiles are not plugins.
+            # This line is meant to be read closely when a stage fails, so
+            # it should carry nothing that needs mentally filtering out.
+            if (entry.startswith("studio-mode-meters")
+                    or entry.startswith(".")
+                    or entry.endswith(".dSYM")):
+                continue
+            others.append(entry)
+    if others:
+        print(f"        also installed, NOT isolated by this test: {', '.join(others)}")
+        print("        a failure here may belong to co-existence, not to this plugin")
+    else:
+        print("        no other OBS plugins installed")
+
+
 def install(lib):
     """Installs into OBS's plugin directory, preserving anything already there."""
     step("Install")
+    report_other_plugins()
     backup = BUNDLE + ".loadtest-backup"
     if os.path.exists(BUNDLE):
         shutil.rmtree(backup, ignore_errors=True)
