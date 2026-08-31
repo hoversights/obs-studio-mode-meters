@@ -201,12 +201,14 @@ Plugin](https://github.com/hoversights/framesw-obs-plugin), which is where it
 was written and first proven. This repository has **its own copy** and does not
 depend on that one: it builds, releases and versions on its own.
 
-FrameSW is a commercial application. This plugin is not part of it, does not
-require it, does not look for it, and sends nothing to it. Everything that only
-made sense inside that product was removed rather than carried over — the
-vendor requests, the NDI audio tap, the OBS configuration writes, and a Windows
-registry lookup for FrameSW's install path. What is left cannot change a
-setting in your OBS because there is no longer a function here that could.
+[FrameSW](https://framesw.com) is a commercial application — a Studio Mode
+switcher built on OBS, and where this metering code was needed first. This
+plugin is not part of it, does not require it, does not look for it, and sends
+nothing to it. Everything that only made sense inside that product was removed
+rather than carried over — the vendor requests, the NDI audio tap, the OBS
+configuration writes, and a Windows registry lookup for FrameSW's install
+path. What is left cannot change a setting in your OBS because there is no
+longer a function here that could.
 
 ## Development disclosure
 
