@@ -1,5 +1,86 @@
 # Open findings
 
+## BLOCKER 2026-08-31: `on_program` cannot distinguish "Preview" from "don't know"
+
+**Do not release, and do not claim Preview-only metering is verified — on
+either platform.**
+
+```rust
+pub fn source_is_on_program(name: &str) -> bool {
+    SOURCE_BUS.lock().ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(name).copied()))
+        .unwrap_or(false)
+}
+```
+
+`SOURCE_BUS` is rebuilt every rescan by walking the Program and Preview
+scenes. A source that is not in that map — because it was created since the
+last walk, or the walk could not resolve a symbol, or the scene roles were
+not yet cached — returns **`false`**, which is the same answer as a source
+genuinely staged in Preview.
+
+### How it surfaced, and what it invalidates
+
+`scripts/load-test.py` staged the tone into the **Program** scene with
+Studio Mode off and read `on_program=False`. Measured on macOS against a
+clean profile and collection, OBS 32.1.2:
+
+```
+== Quantified metering (a 1000 Hz tone at -20.0 dBFS)
+  PASS  the tone is metered on Program
+  PASS  reported level matches the tone
+  FAIL  on_program is true while on Program  — on_program=False
+```
+
+The plugin's own log for the same run shows the ordering:
+
+```
+19:45:44  attached real audio tap to preview scene 'Scene'
+19:45:55  (tone source created in 'Scene')
+19:46:00  attached real audio tap to program scene 'Scene'
+```
+
+**The consequence for the test is worse than the failure itself.** Stage two
+asserts `on_program is false while only in Preview`. With this default, that
+assertion passes when the plugin is working *and* when it knows nothing at
+all. It is an assertion that cannot fail for the reason it claims to test —
+so the Preview-only capability, the entire justification for this plugin,
+has never actually been demonstrated by an automated test on any platform.
+
+Everything else in that run stands: the tone meters at the exact dBFS, and
+the plugin loads and unloads cleanly.
+
+### Why it was invisible until now
+
+The Preview stage used to look for any scene other than Program and SKIP
+when there was none. A freshly created scene collection has exactly one
+scene, so it skipped on every clean machine — while the closing summary
+printed a fixed sentence claiming Preview-only metering had been verified,
+and a skip did not affect the exit code. It only ran at all on the author's
+Mac, where a development session on 2026-08-14 had left scenes `A` and `B`
+in the test collection.
+
+Found when the Windows machine ran it for the first time on 2026-08-31 and
+asked why the stage skipped.
+
+### What a fix has to do
+
+Not simply flip the default. The three states are genuinely different and
+the API currently has two:
+
+| state | correct answer |
+|---|---|
+| in the Program scene | `on_program: true` |
+| in the Preview scene | `on_program: false` |
+| not seen in either yet | **neither** — the source should be absent from the payload, or carry an explicit unknown |
+
+Emitting a level with a confident-looking `on_program` for a source whose
+bus is unknown is the same class of mistake as the original `active` field
+(below): a field whose name promises more than the value behind it knows.
+Whatever is chosen, the load test must be able to fail for the right reason
+— today it cannot.
+
+
 ## OPEN 2026-08-30: the rescan cannot be paused, and nothing can pause it
 
 The plugin re-attaches its audio capture callbacks every 5 seconds, on its

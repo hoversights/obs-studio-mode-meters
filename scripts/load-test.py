@@ -14,23 +14,28 @@ keep calling into libobs. That was observed live on 2026-07-15 inside
 `obs_enum_sources`, and it is invisible unless you deliberately quit OBS
 and read the log afterwards.
 
-WHAT THIS PROVES (all passing as of 2026-08-14). The plugin loads
-alongside FrameSW's, meters a 1 kHz tone at exactly its known -20.0 dBFS,
-reports `on_program` correctly for a source on Program AND for one only in
-Preview — the capability obs-websocket cannot provide — and unloads without
-crashing.
+WHAT THIS PROVES. The plugin loads, meters a 1 kHz tone at exactly its
+known -20.0 dBFS, reports `on_program` correctly for a source on Program
+AND for one only in Preview — the capability obs-websocket cannot provide —
+and unloads without crashing.
 
-Three things had to be right for that to work, each found the hard way and
-each now handled here: run in an isolated profile (a profile carries the
-audio settings), start media sources explicitly (creating one does not play
-it), and keep Studio Mode OFF while adding the Program source (a source
-added into the live Program scene does not begin rendering, so it makes no
-audio).
+Read the closing summary, not this paragraph. It lists what THIS run
+actually established and names anything that skipped. That distinction is
+not pedantry: until 2026-08-31 this file printed a fixed "verified ..."
+sentence including Preview-only metering even on runs where that stage had
+skipped, and a skip did not affect the exit code. The stage skipped on
+every clean machine, because it looked for a second scene in a freshly
+created collection that has exactly one. It passed only on the author's
+Mac, where a development session had left two scenes behind. The one
+capability the plugin exists for was effectively unverified for two weeks
+while this script reported ALL CHECKS PASSED.
 
-WHAT THIS STILL CANNOT TELL YOU. That the levels are correct Verifying a
-Preview-only source really meters, and meters the right number, needs real
-audio on a real source. This asserts events arrive with a sane shape, and
-nothing about the values. Do not read a pass as "metering works".
+Four things had to be right, each found the hard way and each now handled
+here: run in an isolated profile (a profile carries the audio settings),
+CREATE the Preview scene rather than hoping one exists, start media sources
+explicitly (creating one does not play it), and keep Studio Mode OFF while
+adding the Program source (a source added into the live Program scene does
+not begin rendering, so it makes no audio).
 
 Requires: `websocket-client` (pip install websocket-client), OBS installed,
 obs-websocket enabled.
@@ -85,10 +90,20 @@ else:
     BUILT_LIB = os.path.join(REPO, "target", "release", "libobs_studio_mode_meters.dylib")
 
 ok = True
+# What actually happened, so the closing summary can report it rather than
+# recite a fixed sentence that may not be true of this run.
+verified = []
+skipped = []
 
 
 def step(msg):
     print(f"\n== {msg}")
+
+
+def skip(label, detail=""):
+    """A stage that did not run. Recorded, so the summary cannot imply it did."""
+    skipped.append(label)
+    print(f"  SKIP  {label}{'  — ' + detail if detail else ''}")
 
 
 def check(label, passed, detail=""):
@@ -216,7 +231,7 @@ def watch_events(ws, seconds=8):
         # correctly. Failing here would train you to ignore the result --
         # the first run of this script reported FAIL for exactly this
         # reason and the plugin was fine.
-        print("  SKIP  audio_levels events — no source produced audio")
+        skip("audio_levels events — no source produced audio")
         print("        Add an audio source (Settings > Audio, or a media")
         print("        source that is playing) and re-run to exercise this.")
         return 0
@@ -344,16 +359,35 @@ def quantified_test(ws):
             check(f"reported level matches the tone", off <= TONE_TOLERANCE_DB,
                   f"expected {TONE_DBFS} dBFS, read {peak:.1f} (off by {off:.1f} dB)")
             check("on_program is true while on Program", active is True, f"on_program={active}")
+            if ok:
+                verified.append("meters a known tone to the exact dBFS on Program")
 
         # Stage two: the reason this plugin exists.
         step("Preview-only metering — what obs-websocket cannot do")
         request(ws, "SetStudioModeEnabled", {"studioModeEnabled": True})
         time.sleep(1)
+        # CREATE the second scene rather than hunting for one.
+        #
+        # This used to pick any scene that was not Program and SKIP when
+        # there wasn't one. A freshly created scene collection has exactly
+        # one scene, so on any clean machine this stage skipped — and a
+        # skip printed no FAIL, left `ok` true, and was then followed by a
+        # summary line claiming Preview-only metering had been verified.
+        #
+        # It passed on the author's Mac only because a development session
+        # on 2026-08-14 had left two hand-made scenes ("A" and "B") in the
+        # test collection, which persists between runs. So the one stage
+        # that justifies this plugin existing was, in effect, verified by
+        # leftover state on a single machine and skipped everywhere else.
+        # Found on the Windows box's first run, 2026-08-31.
+        other = "loadtest-preview"
         scenes = [s["sceneName"] for s in request(ws, "GetSceneList")["responseData"]["scenes"]]
-        other = next((s for s in scenes if s != program_scene), None)
-        if other is None:
-            print("  SKIP  needs a second scene to stage into; only one exists")
-            return
+        if other not in scenes:
+            made = request(ws, "CreateScene", {"sceneName": other})
+            if not made.get("requestStatus", {}).get("result"):
+                check("created a Preview scene to stage into", False,
+                      made.get("requestStatus", {}).get("comment", "")[:80])
+                return
         request(ws, "SetCurrentPreviewScene", {"sceneName": other})
         # Move the tone into the scene that is now Preview only.
         request(ws, "CreateInput", {
@@ -374,7 +408,14 @@ def quantified_test(ws):
               "no level — this is the capability the plugin exists to provide")
         if p2 is not None:
             check("on_program is false while only in Preview", a2 is False, f"on_program={a2}")
+            if a2 is False:
+                verified.append("meters a Preview-ONLY source and reports the right bus")
         request(ws, "RemoveInput", {"inputName": name + "-preview"})
+        # Leave the collection as this stage found it, so the next run
+        # starts from the same place this one did. Not housekeeping — a
+        # scene left behind is precisely what made this stage look verified
+        # for two weeks.
+        request(ws, "RemoveScene", {"sceneName": other})
     finally:
         request(ws, "RemoveInput", {"inputName": name})
         with contextlib.suppress(Exception):
@@ -438,8 +479,19 @@ def isolate(ws):
     # plugin's 5s rescan a chance to see the new world before measuring.
     time.sleep(7)
 
-    check("switched to an isolated profile", 
+    check("switched to an isolated profile",
           request(ws, "GetProfileList")["responseData"]["currentProfileName"] == TEST_PROFILE)
+    # The collection was NOT checked here until 2026-08-31, and that gap is
+    # how a stale collection went unnoticed for two weeks: the profile
+    # switch reported success while the collection could be anything.
+    now_coll = request(ws, "GetSceneCollectionList")["responseData"]["currentSceneCollectionName"]
+    check("switched to an isolated scene collection", now_coll == TEST_COLLECTION,
+          f"in {now_coll!r}, expected {TEST_COLLECTION!r}")
+    # State the starting conditions out loud. A measurement whose baseline
+    # is not printed cannot be checked afterwards by anyone reading the
+    # output — including the person who wrote it.
+    scenes = [s["sceneName"] for s in request(ws, "GetSceneList")["responseData"]["scenes"]]
+    print(f"        baseline: collection {now_coll!r}, {len(scenes)} scene(s): {scenes}")
     return prev_profile, prev_coll
 
 
@@ -485,11 +537,14 @@ def log_check():
     # about the previous session — so an earlier killed run made every
     # later run report a crash that had not happened.
     tail = text.split("[studio-mode-meters] unloaded", 1)[-1] if clean else ""
+    crashed = any(w in tail.lower() for w in ("crash", "segmentation", "signal"))
     check(
         "no crash after unload",
-        not any(w in tail.lower() for w in ("crash", "segmentation", "signal")),
+        not crashed,
         tail.strip().split("\n")[0][:80] if tail.strip() else "",
     )
+    if clean and not crashed:
+        verified.append("loads and unloads cleanly, with no crash on shutdown")
     return logs[-1] if logs else None
 
 
@@ -589,9 +644,21 @@ def main():
         restore(backup)
         print(f"\n  OBS log: {path}")
 
+    # The summary lists what was actually checked, not a fixed sentence.
+    #
+    # It used to print "reports the right bus on Program AND on
+    # Preview-only" unconditionally — including on runs where that stage
+    # had skipped. Combined with a SKIP not clearing `ok`, a skipped
+    # capability test read as a verified one, which is how this script
+    # reported ALL CHECKS PASSED for two weeks while never once proving the
+    # thing the plugin exists to do on a clean machine.
     print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED"))
-    print("Verified: loads, meters a known tone to the exact dBFS, reports the")
-    print("right bus on Program AND on Preview-only, and unloads cleanly.")
+    if skipped:
+        print("\nNOT verified on this run — each of these SKIPPED:")
+        for s in skipped:
+            print(f"  - {s}")
+        print("A skip is not a pass. Do not read the line above as covering these.")
+    print("\nVerified: " + ", ".join(verified) if verified else "\nNothing was verified.")
     sys.exit(0 if ok else 1)
 
 
