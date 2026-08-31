@@ -34,6 +34,11 @@ nothing about the values. Do not read a pass as "metering works".
 
 Requires: `websocket-client` (pip install websocket-client), OBS installed,
 obs-websocket enabled.
+
+Runs on macOS and Windows. **On Windows, run it from an elevated prompt** —
+OBS loads plugins from `%ProgramData%\\obs-studio\\plugins`, which a normal
+user cannot write to. Without elevation the install step fails and says so
+rather than reporting a broken plugin.
 """
 
 import base64
@@ -48,13 +53,36 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLUGIN_DIR = os.path.expanduser("~/Library/Application Support/obs-studio/plugins")
-BUNDLE = os.path.join(PLUGIN_DIR, "studio-mode-meters.plugin")
-WS_CONFIG = os.path.expanduser(
-    "~/Library/Application Support/obs-studio/plugin_config/obs-websocket/config.json"
-)
-OBS_LOG_DIR = os.path.expanduser("~/Library/Application Support/obs-studio/logs")
 VENDOR = "studio_mode_meters"
+WINDOWS = sys.platform == "win32"
+
+# Everything platform-specific in this script is these five things: where
+# OBS keeps its plugins, its obs-websocket config and its logs, what cargo
+# named the built library, and how you start and stop OBS. The tone is
+# generated with the stdlib and played through `ffmpeg_source`, which is a
+# built-in OBS input kind on both platforms — so the actual measurement is
+# identical and there is no second implementation of it to keep in step.
+if WINDOWS:
+    # %ProgramData%, not %APPDATA% — OBS loads plugins from the machine-wide
+    # location on Windows, while its config and logs are per-user.
+    _PROGRAMDATA = os.environ.get("ProgramData", r"C:\ProgramData")
+    _APPDATA = os.environ.get("APPDATA", os.path.expanduser(r"~\AppData\Roaming"))
+    PLUGIN_DIR = os.path.join(_PROGRAMDATA, "obs-studio", "plugins")
+    # A folder, not a bundle: OBS wants <name>\bin\64bit\<name>.dll here.
+    BUNDLE = os.path.join(PLUGIN_DIR, "studio-mode-meters")
+    WS_CONFIG = os.path.join(
+        _APPDATA, "obs-studio", "plugin_config", "obs-websocket", "config.json"
+    )
+    OBS_LOG_DIR = os.path.join(_APPDATA, "obs-studio", "logs")
+    BUILT_LIB = os.path.join(REPO, "target", "release", "obs_studio_mode_meters.dll")
+else:
+    PLUGIN_DIR = os.path.expanduser("~/Library/Application Support/obs-studio/plugins")
+    BUNDLE = os.path.join(PLUGIN_DIR, "studio-mode-meters.plugin")
+    WS_CONFIG = os.path.expanduser(
+        "~/Library/Application Support/obs-studio/plugin_config/obs-websocket/config.json"
+    )
+    OBS_LOG_DIR = os.path.expanduser("~/Library/Application Support/obs-studio/logs")
+    BUILT_LIB = os.path.join(REPO, "target", "release", "libobs_studio_mode_meters.dylib")
 
 ok = True
 
@@ -85,32 +113,49 @@ def build():
     # a real feature had been silently disconnected.
     warnings = [l for l in r.stderr.split("\n") if l.startswith("warning")]
     check("no build warnings", not warnings, "; ".join(warnings[:2]))
-    return os.path.join(REPO, "target/release/libobs_studio_mode_meters.dylib")
+    return BUILT_LIB
 
 
-def install(dylib):
-    """Installs as an OBS .plugin bundle, preserving anything already there."""
+def install(lib):
+    """Installs into OBS's plugin directory, preserving anything already there."""
     step("Install")
     backup = BUNDLE + ".loadtest-backup"
     if os.path.exists(BUNDLE):
         shutil.rmtree(backup, ignore_errors=True)
         shutil.move(BUNDLE, backup)
-    macos = os.path.join(BUNDLE, "Contents/MacOS")
-    os.makedirs(macos, exist_ok=True)
-    shutil.copy2(dylib, os.path.join(macos, "studio-mode-meters"))
-    with open(os.path.join(BUNDLE, "Contents/Info.plist"), "wb") as f:
-        plistlib.dump(
-            {
-                "CFBundleExecutable": "studio-mode-meters",
-                "CFBundleIdentifier": "com.hoversights.studio-mode-meters",
-                "CFBundleName": "studio-mode-meters",
-                "CFBundlePackageType": "BNDL",
-                "CFBundleVersion": "0.1.0",
-                "LSMinimumSystemVersion": "11.0",
-            },
-            f,
-        )
-    check("bundle installed", os.path.exists(os.path.join(macos, "studio-mode-meters")))
+
+    if WINDOWS:
+        target_dir = os.path.join(BUNDLE, "bin", "64bit")
+        installed = os.path.join(target_dir, "studio-mode-meters.dll")
+    else:
+        target_dir = os.path.join(BUNDLE, "Contents", "MacOS")
+        installed = os.path.join(target_dir, "studio-mode-meters")
+
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        shutil.copy2(lib, installed)
+    except PermissionError:
+        # %ProgramData%\obs-studio\plugins is machine-wide and not writable
+        # by a normal user on a default Windows install. Say so, rather than
+        # letting a bare traceback imply the plugin is at fault.
+        check("bundle installed", False,
+              f"cannot write {target_dir} — run this from an elevated prompt")
+        return backup
+
+    if not WINDOWS:
+        with open(os.path.join(BUNDLE, "Contents/Info.plist"), "wb") as f:
+            plistlib.dump(
+                {
+                    "CFBundleExecutable": "studio-mode-meters",
+                    "CFBundleIdentifier": "com.hoversights.studio-mode-meters",
+                    "CFBundleName": "studio-mode-meters",
+                    "CFBundlePackageType": "BNDL",
+                    "CFBundleVersion": "0.1.0",
+                    "LSMinimumSystemVersion": "11.0",
+                },
+                f,
+            )
+    check("plugin installed", os.path.exists(installed))
     return backup
 
 
@@ -448,18 +493,75 @@ def log_check():
     return logs[-1] if logs else None
 
 
+def find_obs_exe():
+    """obs64.exe, from the registry if possible, else the usual paths."""
+    candidates = []
+    with contextlib.suppress(Exception):
+        import winreg
+
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            with contextlib.suppress(OSError):
+                with winreg.OpenKey(
+                    root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OBS Studio"
+                ) as k:
+                    candidates.append(
+                        os.path.join(winreg.QueryValueEx(k, "InstallLocation")[0], "bin", "64bit")
+                    )
+    candidates += [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "obs-studio", "bin", "64bit"),
+    ]
+    for d in candidates:
+        exe = os.path.join(d, "obs64.exe")
+        if os.path.exists(exe):
+            return exe
+    return None
+
+
+def start_obs():
+    """Starts OBS and returns the Popen handle, or None if it could not."""
+    if not WINDOWS:
+        return subprocess.Popen(
+            ["open", "-W", "-a", "OBS"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    exe = find_obs_exe()
+    if not exe:
+        check("found obs64.exe", False, "not in the registry or Program Files")
+        return None
+    # cwd MUST be obs64.exe's own directory. OBS resolves its data and
+    # locale relative to the working directory, and launched from anywhere
+    # else it dies at startup with a "Failed to load locale" dialog — which
+    # looks exactly like a plugin breaking OBS, and is not.
+    return subprocess.Popen(
+        [exe], cwd=os.path.dirname(exe),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def stop_obs():
+    """Asks OBS to quit gracefully. The unload check depends on graceful."""
+    if not WINDOWS:
+        subprocess.run(["osascript", "-e", 'tell application "OBS" to quit'],
+                       capture_output=True)
+        return
+    # WITHOUT /F, deliberately. taskkill /F terminates the process outright,
+    # so OBS never unloads its modules and never writes the unload line this
+    # script exists to check — the test would then report a crash on every
+    # run, having caused it. Plain taskkill posts a close request, the same
+    # as clicking the window's X.
+    subprocess.run(["taskkill", "/IM", "obs64.exe"], capture_output=True)
+
+
 def main():
-    dylib = build()
+    lib = build()
     if not ok:
         sys.exit("build failed — stopping before touching OBS")
 
-    backup = install(dylib)
+    backup = install(lib)
     obs = None
     try:
         step("Start OBS")
-        obs = subprocess.Popen(
-            ["open", "-W", "-a", "OBS"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        obs = start_obs()
         ws = None
         for _ in range(30):  # OBS takes a while, and post_load runs late
             time.sleep(2)
@@ -478,7 +580,7 @@ def main():
             ws.close()
     finally:
         step("Quit OBS")
-        subprocess.run(["osascript", "-e", 'tell application "OBS" to quit'], capture_output=True)
+        stop_obs()
         time.sleep(6)  # unload + log flush
         if obs:
             with contextlib.suppress(Exception):
