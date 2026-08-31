@@ -283,21 +283,29 @@ jobs:
       # Re-zipped after signing. package-windows.ps1 makes its own zip while
       # building, but that one holds the UNSIGNED dll — publishing it would
       # be the quietest possible way to ship an unsigned plugin.
+      # The ZIP FILE carries version only; the CI ARTIFACT carries the SHA.
+      # Those are two different names and conflating them put a commit hash
+      # into a published download name on v0.1.0, next to a macOS asset that
+      # had none — package-macos.sh names its own zip and never included one.
+      # A release asset is read by people deciding what to download; the SHA
+      # belongs on the CI artifact, where it disambiguates one build from
+      # another.
       - name: Package artifact
         id: package
         run: |
           $Version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           $Sha = $env:GITHUB_SHA.Substring(0, 7)
-          $Name = "studio-mode-meters-$Version-$Sha-windows"
+          $Zip = "studio-mode-meters-$Version-windows.zip"
           Remove-Item "target\studio-mode-meters-*-windows.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path target\studio-mode-meters -DestinationPath "$Name.zip"
-          "name=$Name" >> $env:GITHUB_OUTPUT
+          Compress-Archive -Path target\studio-mode-meters -DestinationPath $Zip
+          "zip=$Zip" >> $env:GITHUB_OUTPUT
+          "name=studio-mode-meters-$Version-$Sha-windows" >> $env:GITHUB_OUTPUT
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.name }}
-          path: ${{ steps.package.outputs.name }}.zip
+          path: ${{ steps.package.outputs.zip }}
           if-no-files-found: error
           retention-days: 90
 
