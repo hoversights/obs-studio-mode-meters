@@ -1,5 +1,56 @@
 # Open findings
 
+## MEASURED 2026-08-31: an inactive source produces no audio, and Monitor Only does not change that
+
+The premise this plugin rests on, and which `PLUGIN_SPLIT_PLAN.md` asserted
+without measuring ("Monitoring Preview-only audio in headphones is a real
+gap in OBS"). Its own bench test, Phase 0.5 Test B, had been parked since
+2026-08-08. **Now measured** — `scripts/probe-inactive-audio.py`, macOS,
+OBS's own `InputVolumeMeters` rather than this plugin's event:
+
+```
+Monitor Only accepted : True          <- OBS accepts the setting
+videoActive           : False         <- source genuinely inactive
+INACTIVE : level = None               <- no audio at all
+ACTIVE   : level = -20.00 dBFS        <- the exact tone, once live
+```
+
+The control is what makes it mean anything: the *same source*, at the same
+settings, reads exactly its known −20.0 dBFS when live and produces nothing
+when its scene is not. So OBS accepts "Monitor Only" on an inactive source
+and it does nothing.
+
+**Consistent with, and explained by, the mixer's own behaviour:** the Audio
+Mixer lists sources in the *current* scene plus the global devices from
+Settings → Audio. A source in an inactive scene is not in that list, so its
+monitor (headphone) button does not exist to be pressed.
+
+### It took four runs, and the failures are the useful part
+
+- **Run 1** measured through *this plugin's* event — circular, and the
+  plugin was not installed, so nothing was ever reported.
+- **Run 2** switched to OBS's native `InputVolumeMeters`, but reused the
+  previous run's scene collection, which had left `offstage` as the current
+  scene. The scene it called INACTIVE was live.
+- **Run 3** established the baseline explicitly and still read nothing,
+  because `TriggerMediaInputAction: RESTART` had been issued while the
+  scene was inactive — a media source in an inactive scene does not play,
+  so the control measured silence and proved nothing.
+- **Run 4** restarted the media *after* activation and produced the result
+  above.
+
+Each bad run reported **INCONCLUSIVE**, never a confident wrong answer,
+purely because the control was checked before the result. A probe without
+that control would have "confirmed" the premise on run 1 by accident.
+
+### Still not answered
+
+Whether sound reaches headphones. Nothing in this probe can hear the
+monitoring device; a negative reading is "no evidence of audio", not
+"proven silent". If OBS routed audio to a monitor device with no meter, this
+would not see it. That last step needs a person with headphones.
+
+
 ## OPEN 2026-08-31: Preview-only metering fails on WINDOWS when FrameSW's plugin is also installed
 
 **Windows only. macOS is unaffected, and that is measured, not assumed.**
