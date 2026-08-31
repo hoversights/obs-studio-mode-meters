@@ -1,5 +1,36 @@
 # Open findings
 
+## SETTLED 2026-08-31: see yes, adjust yes, HEAR no, wire no
+
+Three passes were needed because "can OBS do this" is four questions, and
+each earlier answer got one of them right and generalised it.
+
+| for a Preview-staged source | OBS? |
+|---|---|
+| **See** its level | **yes** — mixer lists it, greyed, live meter |
+| **Adjust** fader / mute | **yes** — measured exact: 6.0 dB, 12.0 dB, -100 muted |
+| **Hear** it via monitoring | **NO** — `Monitoring Enabled`, `Status: Inactive`, silent |
+| **Read it over obs-websocket** | **NO** — absent from `InputVolumeMeters` |
+
+The hearing result is the operator's, with headphones and both outputs on:
+a staged source with monitoring enabled plays nothing, and only becomes
+audible once it is on Program. Advanced Audio Properties shows it as
+`Inactive` the whole time.
+
+**So `PLUGIN_SPLIT_PLAN.md` was RIGHT about monitoring** — "monitoring
+Preview-only audio in headphones is a real gap in OBS" holds. It was the
+*metering* claim that was wrong, and the correction below initially threw
+out both. Two separate claims, two separate answers.
+
+What each gap justifies:
+
+- **Hearing** — FrameSW's NDI monitor tap. A real gap, now confirmed.
+- **The wire** — this plugin. A real gap, measured.
+- **Seeing / adjusting** — neither. OBS already does it, and an in-OBS
+  meter dock would duplicate the Audio Mixer inches away.
+
+---
+
 ## CORRECTION 2026-08-31: OBS's mixer DOES show and control staged sources
 
 **This supersedes the README's original framing and it narrows what this

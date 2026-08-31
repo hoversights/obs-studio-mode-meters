@@ -5,9 +5,14 @@ Program and Preview**, over obs-websocket.
 
 **Who this is for: people building on obs-websocket.** If you just want to
 *look* at a staged source's level yourself, you do not need this plugin —
-OBS's own Audio Mixer already shows Preview-scene sources, with a meter, a
-fader and a mute button. Measured 2026-08-31, and worth saying plainly
-because an earlier version of this README claimed otherwise.
+OBS's own Audio Mixer already shows Preview-scene sources with a live
+meter and a working fader.
+
+What OBS will not do is let you **hear** one. With Monitoring Enabled, a
+Preview-staged source reports `Status: Inactive` in Advanced Audio
+Properties and stays silent; it only plays once it is on Program. So the
+meter moves, the fader works, and there is no sound. Observed directly on
+2026-08-31.
 
 What OBS does **not** do is put those levels on the wire. Its
 `InputVolumeMeters` event covers the output mix only, so a source staged in
