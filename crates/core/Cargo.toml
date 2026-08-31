@@ -1,0 +1,29 @@
+[package]
+name = "studio-mode-meters-core"
+version = "0.2.0"
+edition = "2021"
+publish = false
+# Same licence as the plugin that loads it into OBS, and as OBS itself.
+license = "GPL-2.0-or-later"
+description = "OBS plugin plumbing: FFI guards, calldata, obs_data, metering, and platform symbol resolution."
+
+[lib]
+name = "studio_mode_meters_core"
+
+# `platform.rs` needs real Win32 bindings for its symbol-resolution
+# fallback (Windows has no RTLD_DEFAULT equivalent). Nothing else here
+# touches the Win32 API.
+#
+# `Win32_System_Registry` was dropped with the split: it existed only for
+# a lookup of FrameSW's install path, which does not belong in a plugin
+# published on its own.
+[dependencies]
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+]

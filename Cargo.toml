@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/core"]
+
 [package]
 name = "obs-studio-mode-meters"
 version = "0.1.0"
@@ -13,15 +16,12 @@ repository = "https://github.com/hoversights/obs-studio-mode-meters"
 name = "obs_studio_mode_meters"
 crate-type = ["cdylib"]
 
-# The metering engine, shared for now with the plugin it was extracted
-# from so a fix lands in both while this is still moving. Pinned to a
-# revision rather than tracking a branch: a change over there must never
-# ship into a stranger's OBS because someone pushed to main.
+# The metering engine, now a local crate. It used to be a git dependency on
+# `hoversights/framesw-obs-plugin`, pinned to rev a32dcac; that was always
+# temporary, and cutting it was the condition for publishing. A plugin
+# strangers load into their own OBS should not need a commercial product's
+# repository in order to build, or move on its release schedule.
 #
-# This dependency is TEMPORARY BY DESIGN. Once this plugin is proven in a
-# real OBS, core is copied in here and the dependency deleted — see
-# PLUGIN_SPLIT_PLAN.md's 2026-08-14 decision. After that, an FFI fix must
-# be applied in both repositories.
-[dependencies.studio-mode-meters-core]
-git = "https://github.com/hoversights/framesw-obs-plugin"
-rev = "a32dcac"
+# See crates/core/src/lib.rs for the drift warning that replaces it.
+[dependencies]
+studio-mode-meters-core = { path = "crates/core" }
