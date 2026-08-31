@@ -113,9 +113,9 @@ not called `active`: that name invited a comparison that misleads.
 cargo build --release
 ```
 
-Rust stable. The only direct dependency is the shared metering crate (see
-"Relationship to FrameSW"); it in turn pulls `windows-sys` on Windows and
-nothing at all elsewhere.
+Rust stable, and nothing else — no OBS SDK, no network access, no submodule
+to init. The workspace is this crate plus `crates/core`; the only external
+dependency is `windows-sys` on Windows, and none at all on macOS.
 
 libobs is **not** linked at build time. Every libobs function is resolved at
 runtime by symbol name, so the plugin builds without OBS headers or libraries
@@ -152,19 +152,30 @@ That string is a **public API contract**. Clients match on it, so changing it
 later breaks every integration built against it. It is deliberately generic — it
 describes what the plugin does, not who wrote it.
 
-## Relationship to FrameSW
+## Where this came from
 
-The metering engine is currently shared with the [FrameSW Companion
-Plugin](https://github.com/hoversights/framesw-obs-plugin) through a Rust crate,
-pinned to a specific revision so a change there can never ship into your OBS on
-its own.
-
-That sharing is temporary and deliberate: while the code is still moving, one
-copy means a fix lands in both. Once this plugin has proven itself, the crate is
-copied in here and the dependency deleted, leaving this repository standalone.
+The metering code was extracted from the [FrameSW Companion
+Plugin](https://github.com/hoversights/framesw-obs-plugin), which is where it
+was written and first proven. This repository has **its own copy** and does not
+depend on that one: it builds, releases and versions on its own.
 
 FrameSW is a commercial application. This plugin is not part of it, does not
-require it, and sends nothing to it.
+require it, does not look for it, and sends nothing to it. Everything that only
+made sense inside that product was removed rather than carried over — the
+vendor requests, the NDI audio tap, the OBS configuration writes, and a Windows
+registry lookup for FrameSW's install path. What is left cannot change a
+setting in your OBS because there is no longer a function here that could.
+
+## Development disclosure
+
+This plugin is written with substantial use of AI coding tools (Claude), used
+for implementation, refactoring and test-writing throughout. Direction, testing
+and release engineering are the maintainer's.
+
+Every release is built and tested against a real OBS installation before it
+ships, reported bugs are triaged and answered, the complete source is
+GPL-2.0-or-later and public here, and the commit history records what changed
+and why.
 
 ## Licence
 

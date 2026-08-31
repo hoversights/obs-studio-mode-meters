@@ -1,5 +1,34 @@
 # Open findings
 
+## OPEN 2026-08-30: the rescan cannot be paused, and nothing can pause it
+
+The plugin re-attaches its audio capture callbacks every 5 seconds, on its
+own thread, on its own timer. That means it calls `obs_get_source_by_name`
+and `obs_source_add_audio_capture_callback` at moments it does not choose
+and cannot be told about — including while another obs-websocket client is
+creating, renaming or swapping the very scenes it is attaching to.
+
+`RESCAN_PAUSED` exists for exactly that window, and the plugin it was
+extracted from drives it: that application pauses the rescan around its own
+scene setup and resumes afterwards. **Here it is inert.** Setting it needs a
+vendor request, and this plugin deliberately registers none.
+
+**Not known to be a problem, and deliberately not claimed to be one.** The
+crash that motivated the flag was in a different product, under a specific
+sequence, and a later root-cause pass on a related crash found the first
+explanation of it was wrong — so it is not repeated here as fact. What can
+be said honestly:
+
+- no crash has been observed in this plugin from this cause;
+- the load test does not exercise it, because it never creates scenes while
+  the rescan is running;
+- and if it does turn out to matter, the fix is a design decision, not a
+  patch: adding `pause_rescan`/`resume_rescan` means this plugin starts
+  registering vendor requests, which is the one thing it currently promises
+  not to do.
+
+Worth writing down before release rather than discovering in an issue.
+
 ## `active` is the wrong mechanism — FIXED 2026-08-14
 
 **Not a bug in the plugin's reporting.** Measured directly: for the same
