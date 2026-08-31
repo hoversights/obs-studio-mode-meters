@@ -1,0 +1,350 @@
+name: Build
+
+# Push and tag only, deliberately. NEVER add `pull_request` or
+# `pull_request_target` here: this is a public repo, and those triggers run
+# workflow code against whatever a fork's PR branch contains. On a
+# GitHub-hosted runner that is fine in isolation — each run is a throwaway
+# VM — but it is a standing invitation for a malicious PR to exfiltrate this
+# job's secrets, and this workflow holds both an Apple Developer ID
+# certificate and an Azure service principal that can sign anything as
+# Hoversights.
+#
+# A leak of the latter lets someone sign malware with our public-trust
+# identity, which burns the SmartScreen reputation permanently rather than
+# merely requiring a key rotation. Keep signing and `pull_request`
+# permanently separated in this repo.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+
+# Least privilege by default. The release job below raises it to
+# `contents: write` for itself alone, because it has to create a release.
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Toolchain version comes from rust-toolchain.toml; rustup installs it
+      # on the first cargo invocation. Cross targets are explicit here rather
+      # than in the toolchain file so a Windows checkout never tries to pull
+      # macOS target components.
+      - name: Add macOS cross-compile targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # `--workspace` matters: the tests live in crates/core, and a bare
+      # `cargo test` at the root runs only the cdylib's (of which there are
+      # none) and reports a cheerful zero.
+      - name: Run unit tests
+        run: cargo test --locked --workspace --target aarch64-apple-darwin
+
+      # Imports the Developer ID Application certificate into a throwaway
+      # keychain scoped to this job, following Apple's own documented CI
+      # pattern (create -> unlock -> import -> set-key-partition-list so
+      # codesign can use it without a GUI prompt). Both the keychain and the
+      # decoded .p12 are deleted unconditionally in the last step, including
+      # on failure, so a cancelled run never leaves signing material on disk.
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_CERTIFICATE:-}" ]; then
+            echo "::error::MACOS_CERTIFICATE is not set on this repository." \
+                 "See CI.md — the signing secrets are per-repository and this" \
+                 "repo needs its own copies."
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+
+          echo "$MACOS_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 1800 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PWD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # Append to the existing search list rather than hardcoding
+          # "login.keychain" — the default keychain's name varies across
+          # runner images (some ship login.keychain-db).
+          EXISTING_KEYCHAINS=$(security list-keychains -d user | sed 's/[\"[:space:]]//g')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+
+          SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity in the imported certificate."
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+
+      # Notarization credentials, tags only. Unlike FrameSW's companion
+      # plugin — which is nested inside FrameSW.app and rides that app's
+      # notarization ticket — this plugin is downloaded on its own. Without
+      # notarization every downloaded copy is quarantined and Gatekeeper
+      # refuses to load it, so for a release it is not optional.
+      #
+      # Every-push builds deliberately skip it: notarization takes minutes,
+      # and a push build exists to catch a broken build, not to be installed.
+      - name: Stage notarization credentials
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY:-}" ]; then
+            echo "::error::APPLE_API_KEY is not set, so this tag cannot produce" \
+                 "a notarized build. An un-notarized plugin is refused by" \
+                 "Gatekeeper on every machine that downloads it, so this fails" \
+                 "rather than shipping one. See CI.md."
+            exit 1
+          fi
+          KEY_PATH="$RUNNER_TEMP/notary.p8"
+          echo "$APPLE_API_KEY" | base64 --decode -o "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER_ID=$APPLE_API_ISSUER_ID" >> "$GITHUB_ENV"
+
+      - name: Build and sign universal plugin
+        run: ./scripts/package-macos.sh --release "$SIGN_IDENTITY"
+
+      # Separate from the build so a notarization failure is legible as one.
+      # `--wait` blocks until Apple answers; a SIGBUS-crashed submission is
+      # retried rather than waited on — see NOTARIZATION_LOG.md in the
+      # FrameSW repo for why that is the whole model.
+      - name: Notarize
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          ZIP=$(ls target/studio-mode-meters-*-macos.zip)
+          for attempt in 1 2 3 4 5; do
+            echo "==> notarytool submit, attempt $attempt"
+            if xcrun notarytool submit "$ZIP" \
+                 --key "$APPLE_API_KEY_PATH" \
+                 --key-id "$APPLE_API_KEY_ID" \
+                 --issuer "$APPLE_API_ISSUER_ID" \
+                 --wait 2>&1 | tee /tmp/notary.log; then
+              if grep -q "status: Accepted" /tmp/notary.log; then
+                echo "==> Accepted"
+                exit 0
+              fi
+            fi
+            echo "==> not accepted; retrying"
+            sleep 30
+          done
+          echo "::error::Notarization did not succeed after 5 attempts."
+          exit 1
+
+      - name: Verify signature
+        run: |
+          set -euo pipefail
+          BIN="target/studio-mode-meters.plugin/Contents/MacOS/studio-mode-meters"
+          codesign -vvv --deep --strict "$BIN"
+          codesign -dvvv "$BIN"
+          echo "--- architectures ---"
+          lipo -info "$BIN"
+
+      - name: Name the artifact
+        id: package
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          SHA="${GITHUB_SHA:0:7}"
+          echo "name=studio-mode-meters-${VERSION}-${SHA}-macos" >> "$GITHUB_OUTPUT"
+          echo "zip=$(ls target/studio-mode-meters-*-macos.zip)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 90
+
+      # Runs even if an earlier step failed, so a signing failure never
+      # leaves the certificate sitting in a keychain on disk.
+      - name: Delete temporary keychain and notary key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8" || true
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run unit tests
+        run: cargo test --locked --workspace
+
+      # No -Sign: that switch signs through the maintainer's own `az login`
+      # session and a locally-installed dlib, neither of which exists here.
+      # CI signs with the Azure action below instead, then zips afterwards.
+      - name: Build plugin DLL
+        run: powershell -NoProfile -File scripts\package-windows.ps1
+
+      # Azure Artifact Signing — the product formerly called Azure Trusted
+      # Signing. Microsoft renamed it, which is also why the IAM role reads
+      # "Artifact Signing Certificate Profile Signer" and why searching the
+      # portal for "trusted" finds nothing.
+      #
+      # `endpoint`, `trusted-signing-account-name` and
+      # `certificate-profile-name` are NOT secrets and are deliberately in
+      # the clear: they identify which profile signed a binary, which anyone
+      # can read out of the signature anyway.
+      #
+      # ─── DO NOT EVER RECREATE THE CERTIFICATE PROFILE ─────────────────
+      # SmartScreen reputation accrues to a signing identity, not to the
+      # publisher or the product. Deleting `hoversights-public-trust` and
+      # creating a new profile — even one with an identical name and
+      # subject — restarts that reputation from zero, and every user sees
+      # "Windows protected your PC" again until it rebuilds. If something
+      # looks wrong with signing, fix whatever consumes the profile; never
+      # delete and recreate it.
+      # ──────────────────────────────────────────────────────────────────
+      #
+      # PUBLIC TRUST profile, explicitly. "Public Trust Test" chains to a
+      # test root Windows does not trust: it yields a signature that
+      # verifies under the right flags but is rejected on a real user's
+      # machine — CI green, every download broken.
+      - name: Sign plugin DLL (Azure Artifact Signing)
+        uses: Azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://wus2.codesigning.azure.net/
+          trusted-signing-account-name: hoversights
+          certificate-profile-name: hoversights-public-trust
+          files-folder: ${{ github.workspace }}\target\studio-mode-meters\bin\64bit
+          files-folder-filter: dll
+          file-digest: SHA256
+          # Timestamping is what makes these signatures outlive the
+          # certificate, which Artifact Signing deliberately issues with only
+          # ~3 days of validity. Without it every shipped build would stop
+          # validating within days. Set explicitly, though the action
+          # defaults to it, so nobody removes it believing it optional.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Verified separately rather than trusting the signing step's exit
+      # code: that step succeeding means "the service accepted the request",
+      # not "the artifact a user downloads will validate on their machine".
+      - name: Verify signature
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Dll = "target\studio-mode-meters\bin\64bit\studio-mode-meters.dll"
+          if (-not (Test-Path $Dll)) { throw "DLL not found at $Dll" }
+
+          # signtool ships with the Windows SDK and is not on PATH on the
+          # hosted runner. Take the highest-versioned x64 copy present.
+          $SignTool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $SignTool) { throw "signtool.exe not found on this runner" }
+          Write-Host "Using $($SignTool.FullName)"
+
+          # /pa = Default Authenticode Verification Policy, the same policy
+          # Windows itself applies to a downloaded binary.
+          $Output = & $SignTool.FullName verify /pa /v $Dll 2>&1 | Out-String
+          Write-Host $Output
+          if ($LASTEXITCODE -ne 0) {
+              throw "signtool verify /pa FAILED - the artifact is not trusted"
+          }
+
+          # Checked explicitly rather than assumed: an untimestamped
+          # signature passes /pa today and begins failing in ~3 days, long
+          # after CI went green.
+          if ($Output -notmatch "(?i)timestamp") {
+              throw "Signature carries NO timestamp - it would stop validating once the certificate expires"
+          }
+          Write-Host "Verified: trusted chain + timestamp present."
+
+      # Re-zipped after signing. package-windows.ps1 makes its own zip while
+      # building, but that one holds the UNSIGNED dll — publishing it would
+      # be the quietest possible way to ship an unsigned plugin.
+      - name: Package artifact
+        id: package
+        run: |
+          $Version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $Sha = $env:GITHUB_SHA.Substring(0, 7)
+          $Name = "studio-mode-meters-$Version-$Sha-windows"
+          Remove-Item "target\studio-mode-meters-*-windows.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path target\studio-mode-meters -DestinationPath "$Name.zip"
+          "name=$Name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.name }}.zip
+          if-no-files-found: error
+          retention-days: 90
+
+  # Tags only. Collects both signed artifacts and opens a DRAFT release:
+  # nothing is public until a human reads it and presses publish, which is
+  # also the last chance to check that both assets are actually attached.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what will be attached
+        run: ls -la artifacts
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: artifacts/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          # A bare .plugin bundle cannot be stapled — `stapler` targets apps,
+          # dmgs and pkgs, not loadable bundles. The notarization ticket
+          # therefore lives only on Apple's servers, and a user's Mac has to
+          # reach them the first time it loads the plugin. That is a real
+          # constraint on a first launch, so it is stated here rather than
+          # left to be discovered offline.
+          body: |
+            ## Install
+
+            **macOS** — unzip and copy `studio-mode-meters.plugin` into
+            `~/Library/Application Support/obs-studio/plugins/`, then restart OBS.
+
+            **Windows** — unzip and copy the `studio-mode-meters` folder into
+            `C:\ProgramData\obs-studio\plugins\`, then restart OBS.
+
+            Requires obs-websocket, which ships with OBS 28 and later.
+
+            > **macOS, first load:** this build is notarized but cannot carry
+            > its ticket inside it — Apple's stapler does not support bare
+            > plugin bundles. Your Mac checks with Apple online the first time
+            > it loads the plugin, so be connected for that one launch.
+
+            ## Verifying it loaded
+
+            OBS's log will contain:
+
+            ```
+            [studio-mode-meters] loaded — metering Program and Preview separately
+            [studio-mode-meters] registered as obs-websocket vendor "studio_mode_meters" — emitting audio_levels
+            ```

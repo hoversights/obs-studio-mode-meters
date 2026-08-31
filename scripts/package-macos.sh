@@ -4,6 +4,16 @@
 #   ./scripts/package-macos.sh            # dev: native arch, ad-hoc signed
 #   ./scripts/package-macos.sh --release  # universal, Developer ID signed
 #   ./scripts/package-macos.sh --release --notarize
+#   ./scripts/package-macos.sh --release "Developer ID Application: ..."
+#
+# A bare argument is a signing identity, for CI: it imports the certificate
+# into a throwaway keychain whose identity string cannot be known ahead of
+# time. Locally, omit it and the maintainer's own identity is used.
+#
+# Notarization credentials come from a keychain profile by default
+# (NOTARY_PROFILE, default `obs_controller-notary`). CI has no keychain
+# profile, so it sets APPLE_API_KEY_ID / APPLE_API_ISSUER_ID /
+# APPLE_API_KEY_PATH instead and those take precedence.
 #
 # WHY THIS EXISTS SEPARATELY FROM FrameSW'S PACKAGER. That one deliberately
 # does NOT notarize: its bundle is nested inside FrameSW.app and rides the
@@ -16,13 +26,24 @@ RELEASE=0
 NOTARIZE=0
 SIGN_IDENTITY="-"
 KEYCHAIN_PROFILE="${NOTARY_PROFILE:-obs_controller-notary}"
+# Default identity for a local release build. CI imports its own copy of
+# the certificate into a throwaway keychain, where the identity string is
+# not knowable in advance, so it discovers it and passes it as a bare
+# argument instead.
+DEFAULT_IDENTITY="Developer ID Application: Steve Pence (KF8QMVBSAM)"
 for arg in "$@"; do
   case "$arg" in
-    --release) RELEASE=1; SIGN_IDENTITY="Developer ID Application: Steve Pence (KF8QMVBSAM)" ;;
+    --release) RELEASE=1 ;;
     --notarize) NOTARIZE=1 ;;
-    *) echo "unknown option: $arg" >&2; exit 1 ;;
+    -*) echo "unknown option: $arg" >&2; exit 1 ;;
+    *) SIGN_IDENTITY="$arg" ;;
   esac
 done
+# Resolved after the loop, so `--release` and an explicit identity can be
+# given in either order without one clobbering the other.
+if [ "$RELEASE" = "1" ] && [ "$SIGN_IDENTITY" = "-" ]; then
+  SIGN_IDENTITY="$DEFAULT_IDENTITY"
+fi
 [ "$NOTARIZE" = "1" ] && [ "$RELEASE" = "0" ] && {
   echo "error: --notarize requires --release (nothing to notarize when ad-hoc signed)" >&2
   exit 1
@@ -88,9 +109,19 @@ echo "==> $ZIP"
 
 if [ "$NOTARIZE" = "1" ]; then
   echo "==> Notarizing (this takes minutes)"
+  # An App Store Connect API key wins when supplied, because CI has no
+  # keychain to hold a stored profile. Locally neither is set and the
+  # keychain profile is used.
+  if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+    NOTARY_AUTH=(--key "$APPLE_API_KEY_PATH"
+                 --key-id "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required alongside APPLE_API_KEY_PATH}"
+                 --issuer "${APPLE_API_ISSUER_ID:?APPLE_API_ISSUER_ID is required alongside APPLE_API_KEY_PATH}")
+  else
+    NOTARY_AUTH=(--keychain-profile "$KEYCHAIN_PROFILE")
+  fi
   # See NOTARIZATION_LOG.md in the FrameSW repo: a local notarytool SIGBUS
   # predicts a submission that never resolves, so resubmit rather than wait.
-  xcrun notarytool submit "$ZIP" --keychain-profile "$KEYCHAIN_PROFILE" --wait
+  xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
   # A bare .plugin bundle cannot be stapled — stapler targets apps, dmgs and
   # pkgs. The ticket lives on Apple's servers instead, so first launch needs
   # the user to be online once. Say so in the release notes rather than
