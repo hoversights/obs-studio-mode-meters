@@ -86,3 +86,25 @@ draft release body says so.
    confirm they are really there. A release can look complete in the UI and
    still serve an asset that no anonymous user can fetch; this check has
    caught exactly that before.
+
+## Cross-checking the Windows build from a Mac
+
+`cargo check --target x86_64-pc-windows-msvc` compiles the Windows-only
+code — `platform.rs`'s `imp` module — without a Windows machine. It does not
+link, so it will not catch a linker problem, but it does catch the thing
+that actually breaks: editing Windows FFI you cannot compile.
+
+**The target must be installed for the PINNED toolchain, not just for
+`stable`.** These are separate directories under `~/.rustup/toolchains`, and
+`rust-toolchain.toml` pins `1.95.0`:
+
+```
+rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
+```
+
+Worth stating because of how it fails. `rustup target add` without
+`--toolchain` adds to the default, so the check works right up until
+`rust-toolchain.toml` is introduced or its channel is bumped — then it stops
+with `can't find crate for std`, which reads as a broken checkout rather
+than a missing component. That happened here on 2026-08-31, and a commit
+message claiming the check was clean was written before the output was read.
