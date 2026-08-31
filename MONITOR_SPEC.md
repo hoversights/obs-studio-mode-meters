@@ -23,25 +23,45 @@ audible only once it is on Program. That is the gap.
 
 ---
 
-## The key simplification: nothing new gets created
+## Where the audio comes from — corrected 2026-08-31
 
-The audio already arrives. `attach_role_tap("preview", …)` attaches an
-audio capture callback to the **Preview scene source itself**, and a
-scene's callback delivers its **composited mix** — every staged source
-together, at their current faders, already summed.
+**An earlier version of this spec claimed the plugin already receives the
+Preview scene's composited mix, so the feature was just "route a stream we
+already have". That is wrong, and the correction is the main cost in this
+document.**
 
-So this feature is not "capture some sources and mix them". It is: take a
-stream the plugin already receives and write it to a device.
+Measured twice: `attach_role_tap` attaches an audio capture callback to the
+Preview and Program *scenes*, the OBS log confirms both attachments — and
+neither scene ever produces a level. In OBS, audio goes from sources
+straight to the mix; a scene composites *video*, it does not sum audio, so
+a capture callback on a scene has nothing to fire on.
 
-- No new OBS source.
-- No new capture callback.
-- No mixing code.
-- No interaction with OBS's blocked monitoring path at all.
+Two consequences:
 
-What arrives is exactly what the operator would hear on TAKE, which is the
-right thing to audition.
+- **`attach_role_tap` is dead code in this plugin.** It attaches, logs
+  reassuringly, and delivers nothing. Worth deleting or documenting rather
+  than leaving as a comfort.
+- **The feature must sum the staged sources itself.** Per-source callbacks
+  do work — the two-tone probe reads exactly −20.0 dBFS from Program's
+  1 kHz source and −35.0 dBFS from Preview's 5 kHz source, so the plugin
+  can identify and capture each staged source individually.
 
----
+**FrameSW already does exactly this**, and its Preview/Program separation is
+verified in streaming and recording. So the approach is proven in practice;
+this is not new ground. FrameSW also has a known, separate issue in its
+summing — individual channels being attenuated to hold the summed level —
+which is worth knowing about before writing the same code twice.
+
+### What summing adds to the job
+
+- Sum every source in the Preview scene, each already post-fader (the
+  plugin multiplies by `obs_source_get_volume` and honours mute — measured
+  exact at 6.0 dB, 12.0 dB, and −100 when muted).
+- Handle differing channel counts between sources.
+- Decide headroom policy deliberately, given FrameSW's experience: naive
+  summing clips, and per-channel attenuation to prevent it changes what the
+  operator hears relative to what goes to air. Auditioning a mix that is
+  quieter than the real one is its own kind of wrong.
 
 ## Path
 

@@ -491,10 +491,36 @@ pub fn refresh_source_bus(program: Option<&str>, preview: Option<&str>) {
 /// promises more than the value behind it knows. Caught before release
 /// again, on 2026-08-31, and this time the type makes it unrepresentable.
 pub fn source_bus(name: &str) -> Option<bool> {
-    SOURCE_BUS
+    if let Some(known) = SOURCE_BUS
         .lock()
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(name).copied()))
+    {
+        return Some(known);
+    }
+    // A SCENE is not in SOURCE_BUS. That map is built by walking each
+    // scene's CHILDREN (`collect_bus_member` records `child`), so the scene
+    // itself never appears in it — but the plugin taps scenes too, for the
+    // composited mix, and a scene's bus is simply the role it was tapped as.
+    //
+    // Without this, every scene-level level was dropped by the emit loop's
+    // "unknown bus is not reported" rule, added 2026-08-31. That rule fixed
+    // a real defect (an unseen source reported as Preview) and silently
+    // took the scene taps with it — which then looked exactly like "OBS
+    // produces no audio for scenes", a conclusion drawn and retracted the
+    // same night. The taps were fine; the filter was eating them.
+    for (attached, is_program) in
+        [(&ATTACHED_PROGRAM_SCENE, true), (&ATTACHED_PREVIEW_SCENE, false)]
+    {
+        let guard = match attached.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.as_deref() == Some(name) {
+            return Some(is_program);
+        }
+    }
+    None
 }
 
 pub fn attach_scene_audio_taps() {
@@ -740,6 +766,16 @@ pub fn shutdown() {
 }
 
 #[cfg(test)]
+/// Serialises tests that mutate the module's global bus state.
+///
+/// `SOURCE_BUS` and the ATTACHED_* statics are process-wide, and cargo runs
+/// tests in parallel — so without this one test wipes the map another is
+/// mid-assert on. Observed 2026-08-31: adding the scene-tap tests made
+/// `an_unknown_source_is_none_not_false` fail with `left: None, right:
+/// Some(false)`, which looks exactly like a real regression and was not one.
+static TEST_STATE: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod bus_tests {
     use super::*;
 
@@ -758,6 +794,7 @@ mod bus_tests {
 
     #[test]
     fn an_unknown_source_is_none_not_false() {
+        let _g = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
         set_bus(&[("on-program", true), ("on-preview", false)]);
         // The whole point: "not seen yet" must not be reportable as
         // "staged in Preview". Those are different claims and a client
@@ -769,16 +806,54 @@ mod bus_tests {
 
     #[test]
     fn an_empty_map_still_answers_none() {
+        let _g = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
         set_bus(&[]);
         assert_eq!(source_bus("anything"), None);
     }
 
     #[test]
     fn a_never_initialised_map_answers_none() {
+        let _g = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
         // Before the first rescan completes there is no map at all. That
         // is the widest window in which a level could be emitted with a
         // fabricated bus, so it is asserted explicitly.
         *SOURCE_BUS.lock().unwrap() = None;
+        assert_eq!(source_bus("anything"), None);
+    }
+}
+
+#[cfg(test)]
+mod scene_bus_tests {
+    use super::*;
+
+    /// A scene is never in SOURCE_BUS — that map holds each scene's
+    /// CHILDREN. Its bus comes from the role it was tapped as, and without
+    /// that the emit loop's "unknown bus is not reported" rule silently
+    /// discards every scene-level level.
+    #[test]
+    fn a_tapped_scene_reports_the_bus_it_was_tapped_as() {
+        let _g = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        *SOURCE_BUS.lock().unwrap() = Some(
+            [("child-mic".to_string(), false)].into_iter().collect(),
+        );
+        *ATTACHED_PROGRAM_SCENE.lock().unwrap() = Some("live".into());
+        *ATTACHED_PREVIEW_SCENE.lock().unwrap() = Some("staged".into());
+
+        assert_eq!(source_bus("live"), Some(true), "program scene tap");
+        assert_eq!(source_bus("staged"), Some(false), "preview scene tap");
+        // Children still answer from the map, unchanged.
+        assert_eq!(source_bus("child-mic"), Some(false));
+        // And a genuine unknown is still unknown — the defect the emit
+        // filter exists to prevent must not come back.
+        assert_eq!(source_bus("never-seen"), None);
+    }
+
+    #[test]
+    fn an_untapped_scene_is_still_unknown() {
+        let _g = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        *SOURCE_BUS.lock().unwrap() = Some(std::collections::HashMap::new());
+        *ATTACHED_PROGRAM_SCENE.lock().unwrap() = None;
+        *ATTACHED_PREVIEW_SCENE.lock().unwrap() = None;
         assert_eq!(source_bus("anything"), None);
     }
 }
