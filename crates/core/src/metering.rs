@@ -226,22 +226,71 @@ pub extern "C" fn audio_capture_callback(
     );
 }
 
+/// Diagnostic counters for the Windows co-existence failure.
+///
+/// With `framesw-companion` also installed on Windows, a Preview-only source
+/// reports no level — but "no level" has four different causes and they
+/// demand opposite investigations: the callback never fires, or it fires and
+/// libobs hands us nothing. Everything below is the same early-return from
+/// the outside, which is why the mechanism stayed unmeasured.
+///
+/// Counting is unconditional and lock-free (a relaxed atomic add on the
+/// audio thread is a handful of nanoseconds and allocates nothing — see the
+/// realtime rules in MONITOR_SPEC.md). Only the REPORTING is gated, behind
+/// `SMM_DEBUG_CALLBACKS=1`, so a normal user never sees any of it.
+pub mod callback_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static FIRED: AtomicU64 = AtomicU64::new(0);
+    pub static NULL_AUDIO_DATA: AtomicU64 = AtomicU64::new(0);
+    pub static ZERO_FRAMES: AtomicU64 = AtomicU64::new(0);
+    pub static NULL_PLANE: AtomicU64 = AtomicU64::new(0);
+    pub static DELIVERED: AtomicU64 = AtomicU64::new(0);
+
+    pub fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `fired / null_data / zero_frames / null_plane / delivered`
+    pub fn snapshot() -> (u64, u64, u64, u64, u64) {
+        (
+            FIRED.load(Ordering::Relaxed),
+            NULL_AUDIO_DATA.load(Ordering::Relaxed),
+            ZERO_FRAMES.load(Ordering::Relaxed),
+            NULL_PLANE.load(Ordering::Relaxed),
+            DELIVERED.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn enabled() -> bool {
+        std::env::var("SMM_DEBUG_CALLBACKS").is_ok_and(|v| v == "1")
+    }
+}
+
 pub fn audio_capture_callback_impl(
     _param: *mut c_void,
     source: *mut ObsSourceT,
     audio_data: *const AudioData,
     muted: bool,
 ) {
+    callback_stats::bump(&callback_stats::FIRED);
     if audio_data.is_null() {
+        callback_stats::bump(&callback_stats::NULL_AUDIO_DATA);
         return;
     }
     // Safety: libobs guarantees `audio_data` is valid for the duration of
     // this callback (it's a stack-allocated struct on the audio thread's
     // side, not something we're expected to retain past this call).
     let audio_data = unsafe { &*audio_data };
-    if audio_data.frames == 0 || audio_data.data[0].is_null() {
+    if audio_data.frames == 0 {
+        callback_stats::bump(&callback_stats::ZERO_FRAMES);
         return;
     }
+    if audio_data.data[0].is_null() {
+        callback_stats::bump(&callback_stats::NULL_PLANE);
+        return;
+    }
+    callback_stats::bump(&callback_stats::DELIVERED);
 
     // Verified live against real sources, not assumed from the headers:
     // OBS's internal audio pipeline is 32-bit float, planar
@@ -669,6 +718,20 @@ pub fn spawn_emit_loop() {
         std::thread::sleep(EMIT_INTERVAL);
         if SHUTTING_DOWN.load(Ordering::Acquire) {
             return;
+        }
+        // Reported BEFORE the vendor check below, deliberately: the Windows
+        // failure has to be diagnosable whether or not obs-websocket is
+        // present, and an early `continue` there would hide the one number
+        // that distinguishes "libobs never called us" from "libobs called us
+        // and handed us nothing".
+        if callback_stats::enabled() {
+            let (fired, null_data, zero_frames, null_plane, delivered) =
+                callback_stats::snapshot();
+            crate::log_line(&format!(
+                "callbacks: fired={fired} delivered={delivered} \
+                 null_audio_data={null_data} zero_frames={zero_frames} \
+                 null_plane={null_plane}"
+            ));
         }
         let vendor = VENDOR.load(Ordering::Acquire);
         if vendor.is_null() {

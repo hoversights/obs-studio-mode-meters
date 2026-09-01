@@ -189,9 +189,60 @@ Most people installing a community metering plugin will not have
 `framesw-companion`. But FrameSW's own users are precisely the people who
 would have both, so this cannot go undocumented.
 
-Not yet measured, and not guessed at here. The next step is to establish
-what libobs on Windows does with a second `obs_source_add_audio_capture_callback`
-on a source that is not active — measured, not reasoned about.
+### Ruled out 2026-09-01: wrong-symbol binding
+
+The Windows resolver enumerates every loaded module and takes the FIRST
+`GetProcAddress` hit (`platform.rs`), so a second plugin exporting a
+libobs symbol name would silently capture the binding. That would have
+explained a Windows-only failure exactly.
+
+It is not this. `framesw-companion` exports only the eight OBS module
+entry points — `obs_module_load`, `obs_module_ver`, `obs_current_module`
+and friends — and none of the 27 symbols this plugin resolves is among
+them. Measured with `nm -gU` against the built library, not argued.
+
+### The measurement that was missing
+
+"No level" has four causes and they demand opposite investigations:
+
+| what happened | what it means |
+|---|---|
+| callback never fires | libobs is not dispatching to us at all |
+| fires, `audio_data` null | dispatched with nothing attached |
+| fires, `frames == 0` | dispatched with an empty buffer |
+| fires, `data[0]` null | dispatched with no plane |
+
+From outside, all four look identical — every one is an early return
+producing no level — which is precisely why this stayed unmeasured.
+
+The callback now counts each case. Counting is unconditional and
+lock-free (a relaxed atomic add on the audio thread); only the reporting
+is gated, behind `SMM_DEBUG_CALLBACKS=1`, so a normal user sees nothing.
+The emit loop prints one line every interval:
+
+```
+[studio-mode-meters] callbacks: fired=… delivered=… null_audio_data=… zero_frames=… null_plane=…
+```
+
+Reported before the obs-websocket vendor check, deliberately: the failure
+has to be diagnosable whether or not obs-websocket is present.
+
+**To run it, on Windows, with `framesw-companion` installed:** set
+`SMM_DEBUG_CALLBACKS=1` in the environment OBS is launched from, stage a
+source in Preview only, and read the line for the Preview-only period.
+
+- `fired=0` — libobs never dispatches to the second callback on an
+  inactive source. The bug is in registration or dispatch, and the fix is
+  on our side or upstream's.
+- `fired>0, delivered=0` — libobs dispatches and hands us nothing, which
+  means something else consumed or zeroed the buffer first, and the
+  counter that is non-zero says which.
+- `fired>0, delivered>0` — the audio arrives and the level is being lost
+  AFTER this point, in `source_bus` or the emit filter, and the whole
+  co-existence framing is wrong.
+
+Those three answers point at three different places. Nothing further
+should be theorised until one of them comes back.
 
 ### What it already changed
 
