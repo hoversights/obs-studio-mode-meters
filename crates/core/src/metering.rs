@@ -76,6 +76,39 @@ crate::resolved_fn!(obs_source_remove_audio_capture_callback: extern "C" fn(*mut
 // (obs-audio-controls.c, volmeter_source_data_received) — any meter that
 // should track the slider must do the same, hence this lookup.
 crate::resolved_fn!(obs_source_get_volume: extern "C" fn(*const ObsSourceT) -> f32);
+// `libobs/obs.h`'s `struct obs_audio_info { uint32_t samples_per_sec; enum
+// speaker_layout speakers; };` and `EXPORT bool obs_get_audio_info(struct
+// obs_audio_info *oai);` — the one global source of "how many channels is
+// this OBS instance running". Every source is converted to that layout
+// before its capture callbacks fire, so it is how many planes of
+// `audio_data` hold samples. Copied from framesw-obs-plugin's
+// `crates/core/src/metering.rs`, where it was verified against
+// `obsproject/obs-studio@master`'s real header.
+#[repr(C)]
+pub struct ObsAudioInfo {
+    samples_per_sec: u32,
+    speakers: u32,
+}
+crate::resolved_fn!(obs_get_audio_info: extern "C" fn(*mut ObsAudioInfo) -> bool);
+
+/// `libobs/media-io/audio-io.h`'s `get_audio_channels` — a `static
+/// inline` C function, so it has no linkable symbol to resolve; this is
+/// the same lookup table ported by hand, values verified against the
+/// real header's `enum speaker_layout`
+/// (`SPEAKERS_UNKNOWN=0, MONO=1, STEREO=2, 2POINT1=3, 4POINT0=4,
+/// 4POINT1=5, 5POINT1=6, 7POINT1=8`).
+pub fn speaker_layout_to_channels(speakers: u32) -> u32 {
+    match speakers {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => 5,
+        6 => 6,
+        8 => 8,
+        _ => 0, // SPEAKERS_UNKNOWN (0) or anything unrecognized.
+    }
+}
 crate::resolved_fn!(obs_source_get_name: extern "C" fn(*const ObsSourceT) -> *const c_char);
 // `libobs/obs.h`: "Gets a source by its name. Increments the source
 // reference counter, use obs_source_release to release it when complete."
@@ -211,7 +244,28 @@ pub static THREADS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::ne
 /// human/UI-appropriate cadence. `active` is the whole point of this
 /// plugin existing — it's exactly what `InputVolumeMeters` can't report
 /// for Preview-only content.
-pub static LEVELS: Mutex<Option<HashMap<String, (f32, Option<bool>)>>> = Mutex::new(None);
+pub static LEVELS: Mutex<Option<HashMap<String, (f32, Option<bool>, Vec<f32>)>>> = Mutex::new(None);
+
+/// One audio packet's post-fader levels in dBFS: the loudest channel, and
+/// every channel on its own (−100 for silence or mute). A `None` plane
+/// (a null pointer) counts as silent.
+///
+/// Every channel, not only the first. This read `data[0]` alone until
+/// 2026-09-25, so a mic on an interface's second input, which arrives on
+/// the right channel only, metered as silent, and a mic on the first
+/// input, which plays in one ear, metered as normal. Same fix as
+/// framesw-obs-plugin's copy of this code.
+pub fn packet_levels(planes: &[Option<&[f32]>], volume: f32, muted: bool) -> (f32, Vec<f32>) {
+    let channels_db: Vec<f32> = planes
+        .iter()
+        .map(|plane| {
+            let peak = plane.map_or(0.0, |samples| samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))) * volume;
+            if muted || peak <= 0.0 { -100.0 } else { 20.0 * peak.log10() }
+        })
+        .collect();
+    let loudest = channels_db.iter().copied().fold(-100.0f32, f32::max);
+    (loudest, channels_db)
+}
 
 pub extern "C" fn audio_capture_callback(
     param: *mut c_void,
@@ -295,11 +349,22 @@ pub fn audio_capture_callback_impl(
     // Verified live against real sources, not assumed from the headers:
     // OBS's internal audio pipeline is 32-bit float, planar
     // (AUDIO_FORMAT_FLOAT_PLANAR) by the time a source's own audio
-    // capture callback fires.
-    let samples = unsafe {
-        std::slice::from_raw_parts(audio_data.data[0].cast::<f32>(), audio_data.frames as usize)
-    };
-    let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+    // capture callback fires. Every channel of OBS's layout is read; an
+    // unknown layout reads the first plane only, as this did before.
+    let channels = obs_get_audio_info()
+        .and_then(|get_info| {
+            let mut info = ObsAudioInfo { samples_per_sec: 0, speakers: 0 };
+            get_info(&mut info).then_some(info)
+        })
+        .map_or(0, |info| speaker_layout_to_channels(info.speakers) as usize)
+        .min(MAX_AV_PLANES);
+    let frames = audio_data.frames as usize;
+    let planes: Vec<Option<&[f32]>> = (0..channels.max(1))
+        .map(|c| {
+            let plane = audio_data.data[c];
+            (!plane.is_null()).then(|| unsafe { std::slice::from_raw_parts(plane.cast::<f32>(), frames) })
+        })
+        .collect();
     // Post-fader, matching OBS's mixer meter: these samples are pre-fader
     // (libobs applies volume at mix time, after this callback), so scale
     // by the source's current volume and honor the mute flag here —
@@ -307,8 +372,7 @@ pub fn audio_capture_callback_impl(
     // volume slider pulled to silence. Missing symbol degrades to
     // 1.0 (the old pre-fader behavior), never to silence.
     let volume = obs_source_get_volume().map_or(1.0, |get_volume| get_volume(source));
-    let peak = peak * volume;
-    let peak_db = if muted || peak <= 0.0 { -100.0 } else { 20.0 * peak.log10() };
+    let (peak_db, channels_db) = packet_levels(&planes, volume, muted);
 
     let Some(obs_source_get_name) = obs_source_get_name() else {
         return;
@@ -338,7 +402,7 @@ pub fn audio_capture_callback_impl(
     // degrade to `forward_if_tapped` doing nothing, same as every other
     // best-effort path in this crate.
     if let Ok(mut guard) = LEVELS.lock() {
-        guard.get_or_insert_with(HashMap::new).insert(name, (peak_db, bus));
+        guard.get_or_insert_with(HashMap::new).insert(name, (peak_db, bus, channels_db));
     }
 }
 
@@ -755,8 +819,8 @@ pub fn spawn_emit_loop() {
                 // source appears within about five seconds of being added,
                 // because that is the rescan cadence. This just means it
                 // appears when its bus is known rather than before.
-                .filter_map(|(name, (peak_db, bus))| {
-                    bus.map(|on_program| SourceLevel { name, peak_db, on_program })
+                .filter_map(|(name, (peak_db, bus, channels_db))| {
+                    bus.map(|on_program| SourceLevel { name, peak_db, on_program, channels_db })
                 })
                 .collect()
         };
@@ -918,5 +982,58 @@ mod scene_bus_tests {
         *ATTACHED_PROGRAM_SCENE.lock().unwrap() = None;
         *ATTACHED_PREVIEW_SCENE.lock().unwrap() = None;
         assert_eq!(source_bus("anything"), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::packet_levels;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    /// The bug this replaced: a mic on an interface's second input arrives
+    /// on the right channel only, and reading the first plane alone
+    /// metered it as silent.
+    #[test]
+    fn a_mic_on_the_right_channel_only_is_heard() {
+        let left = [0.0f32; 4];
+        let right = [0.0, 0.5, -0.25, 0.1];
+        let (loudest, channels) = packet_levels(&[Some(&left), Some(&right)], 1.0, false);
+        assert!(close(loudest, -6.02), "loudest {loudest}");
+        assert_eq!(channels[0], -100.0);
+        assert!(close(channels[1], -6.02), "right {}", channels[1]);
+    }
+
+    /// One-ear audio shows up as one live channel and one silent one.
+    #[test]
+    fn each_channel_is_reported_on_its_own() {
+        let left = [0.25f32, -0.1];
+        let right = [0.0f32, 0.0];
+        let (loudest, channels) = packet_levels(&[Some(&left), Some(&right)], 1.0, false);
+        assert!(close(loudest, -12.04));
+        assert!(close(channels[0], -12.04));
+        assert_eq!(channels[1], -100.0);
+    }
+
+    #[test]
+    fn the_fader_scales_every_channel_and_mute_silences_them() {
+        let left = [0.5f32];
+        let right = [1.0f32];
+        let (loudest, channels) = packet_levels(&[Some(&left), Some(&right)], 0.5, false);
+        assert!(close(loudest, -6.02));
+        assert!(close(channels[0], -12.04));
+        let (loudest, channels) = packet_levels(&[Some(&left), Some(&right)], 1.0, true);
+        assert_eq!(loudest, -100.0);
+        assert!(channels.iter().all(|&c| c == -100.0));
+    }
+
+    #[test]
+    fn a_missing_plane_counts_as_silent() {
+        let left = [0.5f32];
+        let (loudest, channels) = packet_levels(&[Some(&left), None], 1.0, false);
+        assert!(close(loudest, -6.02));
+        assert_eq!(channels[1], -100.0);
     }
 }

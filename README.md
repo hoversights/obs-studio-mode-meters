@@ -75,8 +75,8 @@ Connect any obs-websocket client, subscribe to **vendor events**, and read
       "eventType": "audio_levels",
       "eventData": {
         "levels": [
-          { "name": "Host Mic",   "peak_db": -18.3, "on_program": true  },
-          { "name": "Guest Cam",  "peak_db": -24.0, "on_program": false }
+          { "name": "Host Mic",   "peak_db": -18.3, "on_program": true,  "channel_peaks": [{ "db": -18.3 }, { "db": -100 }] },
+          { "name": "Guest Cam",  "peak_db": -24.0, "on_program": false, "channel_peaks": [{ "db": -24.0 }, { "db": -24.5 }] }
         ]
       }
     }
@@ -87,7 +87,8 @@ Connect any obs-websocket client, subscribe to **vendor events**, and read
 | field | meaning |
 |---|---|
 | `name` | the OBS source name |
-| `peak_db` | peak level in dBFS over the batch window; `-60` or lower is effectively silence |
+| `peak_db` | peak level in dBFS over the batch window, of the loudest channel; `-60` or lower is effectively silence |
+| `channel_peaks` | the same peak for each channel on its own, in OBS's channel order (`[{"db": L}, {"db": R}]` for stereo): a mic that arrives on one side only shows here |
 | `on_program` | `true` when the source is in the scene currently on Program, `false` when it is in the Preview scene |
 
 Subscribe with the `Vendors` event category (`1 << 9`). A client subscribed to
